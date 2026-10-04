@@ -1,6 +1,8 @@
 name: Minecraft 26.2 / 26.3 Android Native + Debug APK
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       lwjgl_version:
