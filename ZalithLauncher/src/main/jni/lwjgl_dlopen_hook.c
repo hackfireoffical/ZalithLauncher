@@ -1,5 +1,6 @@
 //
 // Created by maks on 06.01.2025.
+// Extended for Minecraft 26.2+ Android natives (Zalith fork).
 //
 
 #include <android/api-level.h>
@@ -11,34 +12,75 @@
 #include <dlfcn.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 extern void* maybe_load_vulkan();
 
 /**
- * Basically a verbatim implementation of ndlopen(), found at
- * https://github.com/PojavLauncherTeam/lwjgl3/blob/3.3.1/modules/lwjgl/core/src/generated/c/linux/org_lwjgl_system_linux_DynamicLinkLoader.c#L11
- * but with our own additions for stuff like vulkanmod.
+ * Redirect LWJGL's DynamicLinkLoader.ndlopen so that:
+ *  1. libvulkan.so is loaded via our custom path
+ *  2. Any attempt to load a glibc-linked library name that we ship
+ *     as an Android .so is redirected to the APK native dir
  */
 static jlong ndlopen_bugfix(__attribute__((unused)) JNIEnv *env,
                             __attribute__((unused)) jclass class,
                             jlong filename_ptr,
                             jint jmode) {
     const char* filename = (const char*) filename_ptr;
+    int mode = (int)jmode;
 
-    // Oveeride vulkan loading to let us load vulkan ourselves
-    if(strstr(filename, "libvulkan.so") == filename) {
+    // Override vulkan loading to let us load vulkan ourselves
+    if (filename != NULL && strstr(filename, "libvulkan.so") == filename) {
         printf("LWJGL linkerhook: replacing load for libvulkan.so with custom driver\n");
         return (jlong) maybe_load_vulkan();
     }
 
-    // This hook also serves the task of mitigating a bug: the idea is that since, on Android 10 and
-    // earlier, the linker doesn't really do namespace nesting.
-    // It is not a problem as most of the libraries are in the launcher path, but when you try to run
-    // VulkanMod which loads shaderc outside of the default jni libs directory through this method,
-    // it can't load it because the path is not in the allowed paths for the anonymous namesapce.
-    // This method fixes the issue by being in libpojavexec, and thus being in the classloader namespace
+    // If the path still points at a cache-extracted Linux native (glibc),
+    // try the same basename from POJAV_NATIVEDIR first.
+    if (filename != NULL) {
+        const char* base = strrchr(filename, '/');
+        base = base ? base + 1 : filename;
 
-    int mode = (int)jmode;
+        // Modules we provide (or will provide) as Android builds
+        static const char* kAndroidModules[] = {
+            "libglfw.so",
+            "libopenal.so",
+            "libjemalloc.so",
+            "liblwjgl_stb.so",
+            "libstb.so",
+            "liblwjgl_tinyfd.so",
+            "libtinyfd.so",
+            "libspirv-cross.so",
+            "libshaderc.so",
+            "libvma.so",
+            "liblwjgl_vma.so",
+            "liblwjgl.so",
+            NULL
+        };
+
+        int is_ours = 0;
+        for (int i = 0; kAndroidModules[i]; i++) {
+            if (strcmp(base, kAndroidModules[i]) == 0) {
+                is_ours = 1;
+                break;
+            }
+        }
+
+        if (is_ours) {
+            const char* nativeDir = getenv("POJAV_NATIVEDIR");
+            if (nativeDir && nativeDir[0]) {
+                char alt[512];
+                snprintf(alt, sizeof(alt), "%s/%s", nativeDir, base);
+                void* handle = dlopen(alt, mode);
+                if (handle != NULL) {
+                    printf("LWJGL linkerhook: redirected %s -> %s\n", filename, alt);
+                    return (jlong) handle;
+                }
+            }
+        }
+    }
+
+    // Fallback: normal dlopen (still needed for genuine Android libs)
     return (jlong) dlopen(filename, mode);
 }
 
