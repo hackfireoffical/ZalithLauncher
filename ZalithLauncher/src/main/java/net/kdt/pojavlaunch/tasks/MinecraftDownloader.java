@@ -292,26 +292,12 @@ public class MinecraftDownloader {
         scheduleLwjglMavenModule(targetDirectory, "lwjgl-vma", version, base, null);
         scheduleLwjglMavenModule(targetDirectory, "lwjgl-vulkan", version, base, null);
 
-        // LWJGL modules load their platform native libraries from their
-        // matching classifier JARs. Android devices running Minecraft use
-        // the Linux ARM64 LWJGL platform.
-        String[] nativeModules = {
-                "lwjgl",
-                "lwjgl-glfw",
-                "lwjgl-jemalloc",
-                "lwjgl-openal",
-                "lwjgl-opengl",
-                "lwjgl-freetype",
-                "lwjgl-shaderc",
-                "lwjgl-spvc",
-                "lwjgl-stb",
-                "lwjgl-tinyfd",
-                "lwjgl-vma"
-        };
-        for (String module : nativeModules) {
-            scheduleLwjglMavenClassifier(targetDirectory, module, version, base,
-                    "natives-linux-arm64");
-        }
+        // Do NOT download desktop LWJGL native classifier JARs for Android.
+        // Minecraft 26.2+ uses the upstream Java modules, while Android-compatible
+        // .so files are supplied by the launcher APK/native build. Downloading
+        // natives-linux-arm64 here causes LWJGL to extract glibc/libstdc++-linked
+        // desktop libraries and crash before GLFW/OpenGL initialization.
+
     }
 
     private static boolean isMinecraft26(String versionName) {
