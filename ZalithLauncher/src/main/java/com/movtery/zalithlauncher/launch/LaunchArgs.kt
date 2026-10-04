@@ -129,6 +129,10 @@ class LaunchArgs(
             "game-native/${minecraftVersion.getVersionName()}"
         ).absolutePath
 
+        // LWJGL fails with "Failed to find an appropriate directory to extract the
+        // native library" when its extract path does not exist yet, so create them.
+        listOf("lwjgl", "jna", "netty").forEach { File(nativeWorkDir, it).mkdirs() }
+
         // Remove conflicting values supplied by the Minecraft version JSON.
         // These properties are order-sensitive: the final value wins.
         result.removeAll {
