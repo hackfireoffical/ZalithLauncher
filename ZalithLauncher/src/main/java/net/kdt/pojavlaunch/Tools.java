@@ -190,10 +190,19 @@ public final class Tools {
         File[] files = folder.listFiles();
         if (files == null) return;
         Arrays.sort(files, (a, b) -> a.getName().compareToIgnoreCase(b.getName()));
-        for (File file : files) {
-            if (file.isFile() && file.getName().endsWith(".jar")) {
-                libStr.append(file.getAbsolutePath()).append(":");
+        for (File file: files) {
+            if (!file.isFile() || !file.getName().endsWith(".jar")) continue;
+
+            // Desktop LWJGL native classifier JARs are not Android natives.
+            // If they reach the classpath, LWJGL can extract glibc/libstdc++-
+            // linked .so files and Android will fail to load them.
+            if (file.getName().contains("-natives-")) {
+                Logging.d(InfoDistributor.LAUNCHER_NAME,
+                        "Skipped desktop LWJGL native JAR: " + file.getName());
+                continue;
             }
+
+            libStr.append(file.getAbsolutePath()).append(":");
         }
     }
 
