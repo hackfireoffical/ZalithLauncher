@@ -67,9 +67,12 @@ class LaunchArgs(
         val configFilePath = if (is7) LibPath.LOG4J_XML_1_7 else LibPath.LOG4J_XML_1_12
         argsList.add("-Dlog4j.configurationFile=${configFilePath.absolutePath}")
 
-        // Minecraft 26.x: use Android-native replacements packaged in the APK.
-        // This bypasses the incompatible Linux ARM64 LWJGL natives extracted from JARs.
-        if (isMinecraft26(minecraftVersion.getVersionName())) {
+        // Minecraft 26.2 / 26.3 use LWJGL 3.4.x modules (spvc, shaderc, vma) whose desktop
+        // Linux ARM64 natives cannot run on Android. Use the Android-native copies bundled
+        // in the APK instead of the copies extracted from the game JARs.
+        // 26.3 snapshot 5+ also compiles shaders with ShaderC on OpenGL, so libshaderc.so
+        // is required even when the OpenGL backend is forced.
+        if (isMinecraft26Native()) {
             val androidNativeDir = PathManager.DIR_NATIVE_LIB
             argsList.add("-Dorg.lwjgl.spvc.libname=$androidNativeDir/libspirv-cross.so")
             argsList.add("-Dorg.lwjgl.shaderc.libname=$androidNativeDir/libshaderc.so")
@@ -81,23 +84,6 @@ class LaunchArgs(
             val dirPath = versionSpecificNativesDir.absolutePath
             argsList.add("-Djava.library.path=$dirPath:${PathManager.DIR_NATIVE_LIB}")
             argsList.add("-Djna.boot.library.path=$dirPath")
-        }
-
-        // Minecraft 26.x uses LWJGL 3.4.1 modules whose desktop Linux ARM64
-        // natives cannot run on Android. Use the Android-native copies bundled
-        // in the APK instead of the copies extracted into the game cache.
-        val versionName = minecraftVersion.getVersionName()
-        val isMinecraft26 = versionName == "26.2" ||
-            versionName.startsWith("26.2-") ||
-            versionName.startsWith("26.2.") ||
-            versionName == "26.3" ||
-            versionName.startsWith("26.3-") ||
-            versionName.startsWith("26.3.")
-        if (isMinecraft26) {
-            val androidNativeDir = PathManager.DIR_NATIVE_LIB
-            argsList.add("-Dorg.lwjgl.spvc.libname=$androidNativeDir/libspirv-cross.so")
-            argsList.add("-Dorg.lwjgl.shaderc.libname=$androidNativeDir/libshaderc.so")
-            argsList.add("-Dorg.lwjgl.vma.libname=$androidNativeDir/libvma.so")
         }
 
         return argsList
@@ -171,14 +157,7 @@ class LaunchArgs(
      * are unavailable.
      */
     private fun getGraphicsBackendArgs(): List<String> {
-        val versionName = minecraftVersion.getVersionName()
-        val isMinecraft26_2OrNewer = versionName == "26.2" ||
-            versionName.startsWith("26.2-") ||
-            versionName.startsWith("26.2.") ||
-            versionName == "26.3" ||
-            versionName.startsWith("26.3-") ||
-            versionName.startsWith("26.3.")
-        if (!isMinecraft26_2OrNewer) return emptyList()
+        if (!isMinecraft26Native()) return emptyList()
 
         val selected = minecraftVersion.getVersionConfig().getGraphicsApi()
             .ifEmpty { AllSettings.graphicsApi.getValue() }
@@ -236,12 +215,25 @@ class LaunchArgs(
         return list.toTypedArray()
     }
 
-    private fun isMinecraft26(versionName: String): Boolean =
-        versionName == "26.2" || versionName.startsWith("26.2-") ||
-            versionName.startsWith("26.2.") || versionName == "26.3" ||
-            versionName.startsWith("26.3-") || versionName.startsWith("26.3.")
+    /**
+     * True for Minecraft 26.2 and 26.3 (releases, snapshots and pre-releases).
+     * Checks the install name, the version JSON id and `inheritsFrom`, so renamed
+     * installs and loader profiles (Fabric/Forge/NeoForge on 26.x) are detected too.
+     */
+    private fun isMinecraft26Native(): Boolean =
+        listOfNotNull(
+            minecraftVersion.getVersionName(),
+            versionInfo.id,
+            versionInfo.inheritsFrom
+        ).any { MC_26_NATIVE_REGEX.matches(it) || MC_26_LOADER_REGEX.containsMatchIn(it) }
 
     companion object {
+        // 26.2, 26.2.1, 26.2-snapshot-3, 26.3-pre1, ...
+        private val MC_26_NATIVE_REGEX = Regex("""^26\.[23](?:[.\-].*)?$""")
+
+        // Loader profile ids that end with the game version, e.g. fabric-loader-0.19.3-26.3
+        private val MC_26_LOADER_REGEX = Regex("""-26\.[23](?:\.\d+)?(?:-[A-Za-z0-9._\-]+)?$""")
+
         @JvmStatic
         fun getCacioJavaArgs(isJava8: Boolean): List<String> {
             val argsList: MutableList<String> = ArrayList()
