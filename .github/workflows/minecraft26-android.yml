@@ -48,6 +48,35 @@ jobs:
       - name: Install native tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build cmake unzip binutils
 
+      - name: Build Android GLFW + SDL3 backend from MojoLauncher
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/.mojo-native"
+          mkdir -p "$ROOT"
+          git clone --depth 1 --branch v3_openjdk --recurse-submodules https://github.com/MojoLauncher/MojoLauncher.git "$ROOT/MojoLauncher"
+
+          cmake -S "$ROOT/MojoLauncher/app_pojavlauncher/src/main/jni"             -B "$ROOT/build"             -GNinja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake"             -DANDROID_ABI="$ANDROID_ABI"             -DANDROID_PLATFORM="$ANDROID_PLATFORM"             -DANDROID_STL=c++_static             -DCMAKE_ANDROID_STL_TYPE=c++_static             -DGLFW_BUILD_WAYLAND=OFF             -DGLFW_BUILD_X11=OFF             -DGLFW_BUILD_ANDROID=ON             -DGLFW_BUILD_EXAMPLES=OFF             -DGLFW_BUILD_TESTS=OFF             -DGLFW_INSTALL=OFF             -DBUILD_SHARED_LIBS=ON             -DSDL_SHARED=ON             -DSDL_VIDEO=ON             -DSDL_AUDIO=ON             -DSDL_STATIC=OFF             -DSDL_CAMERA=OFF             -DSDL_TESTS=OFF             -DSDL_EXAMPLES=OFF             -DSDL3_MAINPROJECT=OFF
+
+          cmake --build "$ROOT/build" --target glfw SDL3-shared mojoexec -j2
+
+          mkdir -p ZalithLauncher/src/main/jniLibs/arm64-v8a
+          find "$ROOT/build" -type f -name 'libglfw.so' -exec cp {} ZalithLauncher/src/main/jniLibs/arm64-v8a/ \;
+          find "$ROOT/build" -type f -name 'libSDL3.so' -exec cp {} ZalithLauncher/src/main/jniLibs/arm64-v8a/ \;
+          find "$ROOT/build" -type f -name 'libmojoexec.so' -exec cp {} ZalithLauncher/src/main/jniLibs/arm64-v8a/ \;
+
+          test -f ZalithLauncher/src/main/jniLibs/arm64-v8a/libglfw.so
+          test -f ZalithLauncher/src/main/jniLibs/arm64-v8a/libSDL3.so
+          test -f ZalithLauncher/src/main/jniLibs/arm64-v8a/libmojoexec.so
+
+          for so in ZalithLauncher/src/main/jniLibs/arm64-v8a/libglfw.so                     ZalithLauncher/src/main/jniLibs/arm64-v8a/libSDL3.so                     ZalithLauncher/src/main/jniLibs/arm64-v8a/libmojoexec.so; do
+            echo "==== $so ===="
+            file "$so"
+            readelf -d "$so" | grep NEEDED || true
+            ! readelf -d "$so" | grep -q 'libstdc++.so.6'
+            ! readelf -d "$so" | grep -q 'libc++_shared.so'
+          done
+
       - name: Build Android arm64 LWJGL replacements
         shell: bash
         run: |
