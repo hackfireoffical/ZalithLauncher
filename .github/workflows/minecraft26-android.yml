@@ -1,7 +1,16 @@
-name: Minecraft 26.2 Android Native + Debug APK
+name: Minecraft 26.2 / 26.3 Android Native + Debug APK
 
 on:
   workflow_dispatch:
+    inputs:
+      lwjgl_version:
+        description: 'LWJGL version used by the target Minecraft version (check libraries in its version JSON)'
+        required: false
+        default: '3.4.1'
+      shaderc_tag:
+        description: 'google/shaderc tag matching that LWJGL version (3.4.1 = v2026.1, 3.4.2 = v2026.2, 3.4.3 = v2026.3)'
+        required: false
+        default: 'v2026.1'
 
 permissions:
   contents: read
@@ -11,8 +20,8 @@ env:
   ANDROID_PLATFORM: android-26
   ANDROID_ABI: arm64-v8a
   SPIRV_CROSS_TAG: vulkan-sdk-1.4.350.1
-  SHADERC_TAG: v2026.1
-  LWJGL_VERSION: 3.4.1
+  SHADERC_TAG: ${{ inputs.shaderc_tag || 'v2026.1' }}
+  LWJGL_VERSION: ${{ inputs.lwjgl_version || '3.4.1' }}
 
 jobs:
   build:
@@ -43,6 +52,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo "LWJGL_VERSION=$LWJGL_VERSION SHADERC_TAG=$SHADERC_TAG"
           ROOT="$GITHUB_WORKSPACE/.mc26-native"
           OUT="$ROOT/out"
           NDK="$ANDROID_NDK"
@@ -142,7 +152,7 @@ jobs:
       - name: Upload native libraries
         uses: actions/upload-artifact@v4
         with:
-          name: Minecraft-26.2-Android-arm64-natives
+          name: Minecraft-26.x-Android-arm64-natives
           path: .mc26-native/out/*.so
 
       - name: Build debug arm64 APK
@@ -154,5 +164,5 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: ZalithLauncher-MC26.2-Android-arm64-Debug
+          name: ZalithLauncher-MC26.2-26.3-Android-arm64-Debug
           path: ZalithLauncher/build/outputs/apk/debug/*
