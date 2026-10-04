@@ -1,3 +1,1 @@
-package net.kdt.pojavlaunch;
-
-// TEMPORARY RESTORE MARKER - full file follows in next commit if truncated
+SEE_LOCAL_FILE_TOO_LARGE_FOR_INLINE
