@@ -74,11 +74,21 @@ class LaunchArgs(
         // is required even when the OpenGL backend is forced.
         if (isMinecraft26Native()) {
             val androidNativeDir = PathManager.DIR_NATIVE_LIB
+            val lwjglExtractDir = File(
+                PathManager.DIR_CACHE,
+                "game-native/${minecraftVersion.getVersionName()}/lwjgl"
+            )
+            lwjglExtractDir.mkdirs()
+
+            // Keep LWJGL extraction and lookup entirely inside Android-writable
+            // directories. The game JSON may point at desktop-native locations,
+            // so these properties must be the final values.
+            argsList.add("-Dorg.lwjgl.system.SharedLibraryExtractPath=${lwjglExtractDir.absolutePath}")
+            argsList.add("-Dorg.lwjgl.librarypath=$androidNativeDir")
             argsList.add("-Dorg.lwjgl.spvc.libname=$androidNativeDir/libspirv-cross.so")
             argsList.add("-Dorg.lwjgl.shaderc.libname=$androidNativeDir/libshaderc.so")
             argsList.add("-Dorg.lwjgl.vma.libname=$androidNativeDir/libvma.so")
         }
-
         val versionSpecificNativesDir = File(PathManager.DIR_CACHE, "natives/${minecraftVersion.getVersionName()}")
         if (versionSpecificNativesDir.exists()) {
             val dirPath = versionSpecificNativesDir.absolutePath
