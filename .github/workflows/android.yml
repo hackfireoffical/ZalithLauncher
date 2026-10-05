@@ -182,6 +182,8 @@ jobs:
           EOF
 
           # Explicit setupMalloc TU — generated Vma.cpp does not always emit it.
+          # extern "C" is required: without it the JNI function gets a C++ mangled name
+          # (_Z...) and the JVM can never find Java_org_lwjgl_util_vma_LibVma_setupMalloc.
           cat > "$ROOT/vma/setup_malloc.cpp" <<'EOF'
           #include "lwjgl_malloc.h"
           mallocPROC org_lwjgl_malloc;
@@ -190,7 +192,9 @@ jobs:
           freePROC org_lwjgl_free;
           aligned_allocPROC org_lwjgl_aligned_alloc;
           aligned_freePROC org_lwjgl_aligned_free;
+          extern "C" {
           XSETUP_MALLOC(org_lwjgl_util_vma_LibVma)
+          }
           EOF
 
           "$CLANGXX" -std=c++17 -fPIC -shared -O2 -static-libstdc++ -fvisibility=default             -I"$ROOT/vma/include"             -I"$ROOT/vulkan-headers/include"             -Wl,-soname,libvma.so             "$ROOT/vma/org_lwjgl_util_vma_Vma.cpp"             "$ROOT/vma/setup_malloc.cpp"             -llog -landroid -o "$OUT/libvma.so"
