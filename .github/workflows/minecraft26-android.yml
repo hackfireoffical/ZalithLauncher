@@ -113,10 +113,16 @@ jobs:
           test -n "$SHADERC_A"
           "$CLANGXX" -shared -fPIC -O2 -static-libstdc++             -Wl,--whole-archive "$SHADERC_A" -Wl,--no-whole-archive             -Wl,-soname,libshaderc.so             -llog -landroid -lz -ldl -lm -latomic             -o "$OUT/libshaderc.so"
 
+          # vk_mem_alloc.h needs newer Vulkan headers than NDK 25 ships
+          # (VkBufferUsageFlags2CreateInfoKHR), so use current Khronos headers.
+          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git "$ROOT/vulkan-headers"
+
           mkdir -p "$ROOT/vma/include"
           curl -fsSL "https://raw.githubusercontent.com/LWJGL/lwjgl3/$LWJGL_VERSION/modules/lwjgl/vma/src/generated/c/org_lwjgl_util_vma_Vma.cpp"             -o "$ROOT/vma/org_lwjgl_util_vma_Vma.cpp"
           curl -fsSL "https://raw.githubusercontent.com/LWJGL/lwjgl3/$LWJGL_VERSION/modules/lwjgl/vma/src/main/c/vk_mem_alloc.h"             -o "$ROOT/vma/include/vk_mem_alloc.h"
 
+          # The generated sources call these macros without a trailing ';',
+          # so the semicolons have to be part of the macro (as in LWJGL's common_tools.h).
           cat > "$ROOT/vma/include/common_tools.h" <<'EOF'
           #pragma once
           #include <jni.h>
@@ -125,7 +131,8 @@ jobs:
           #define ENABLE_WARNINGS()
           #define EXTERN_C_ENTER extern "C" {
           #define EXTERN_C_EXIT }
-          #define UNUSED_PARAMS(a,b) (void)(a); (void)(b)
+          #define UNUSED_PARAM(a) (void)(a);
+          #define UNUSED_PARAMS(a,b) (void)(a); (void)(b);
           EOF
 
           cat > "$ROOT/vma/include/lwjgl_malloc.h" <<'EOF'
@@ -150,7 +157,7 @@ jobs:
           #define SETUP_MALLOC(classPath)           JNIEXPORT void JNICALL Java_##classPath##_setupMalloc(JNIEnv*, jclass, jlong malloc, jlong calloc, jlong realloc, jlong free, jlong aligned_alloc, jlong aligned_free) {             org_lwjgl_malloc=(mallocPROC)(uintptr_t)malloc;             org_lwjgl_calloc=(callocPROC)(uintptr_t)calloc;             org_lwjgl_realloc=(reallocPROC)(uintptr_t)realloc;             org_lwjgl_free=(freePROC)(uintptr_t)free;             org_lwjgl_aligned_alloc=(aligned_allocPROC)(uintptr_t)aligned_alloc;             org_lwjgl_aligned_free=(aligned_freePROC)(uintptr_t)aligned_free;           }
           EOF
 
-          "$CLANGXX" -std=c++17 -fPIC -shared -O2 -static-libstdc++             -I"$ROOT/vma/include"             -Wl,-soname,libvma.so             "$ROOT/vma/org_lwjgl_util_vma_Vma.cpp"             -llog -landroid -o "$OUT/libvma.so"
+          "$CLANGXX" -std=c++17 -fPIC -shared -O2 -static-libstdc++ -ferror-limit=0             -I"$ROOT/vma/include"             -I"$ROOT/vulkan-headers/include"             -Wl,-soname,libvma.so             "$ROOT/vma/org_lwjgl_util_vma_Vma.cpp"             -llog -landroid -o "$OUT/libvma.so"
 
           for so in "$OUT"/*.so; do
             echo "==== $so ===="
