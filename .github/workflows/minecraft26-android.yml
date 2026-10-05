@@ -114,7 +114,6 @@ jobs:
           test -n "$SHADERC_A"
 
           # LWJGL desktop libshaderc.so also exports the glslang resource-limits C API.
-          # That lives in glslang-default-resource-limits, which is NOT inside shaderc_combined.
           EXTRA_LIBS=()
           cmake --build "$ROOT/shaderc-build" --target glslang-default-resource-limits -j2 || true
           RESLIM_A="$(find "$ROOT/shaderc-build" -type f -name 'libglslang-default-resource-limits.a' -print -quit || true)"
@@ -122,7 +121,6 @@ jobs:
             echo "Using CMake target archive: $RESLIM_A"
             EXTRA_LIBS+=("$RESLIM_A")
           else
-            # Fallback: compile the C API source from the synced glslang tree.
             RESLIM_SRC="$(find "$ROOT/shaderc" -type f \( -name 'resource_limits_c.cpp' -o -name 'ResourceLimits.cpp' \) | head -1)"
             echo "RESLIM_SRC=${RESLIM_SRC:-none}"
             if [ -n "${RESLIM_SRC:-}" ]; then
@@ -133,7 +131,6 @@ jobs:
               echo "WARNING: no resource-limits source found; defining thin stubs"
               cat > "$ROOT/glslang_reslim_stubs.c" <<'STUB'
           #include <stddef.h>
-          /* Opaque stand-ins so the dynamic table has the 4 symbols LWJGL lists. */
           typedef struct glslang_resource_s glslang_resource_t;
           __attribute__((visibility("default"))) const glslang_resource_t *glslang_default_resource(void) { return NULL; }
           __attribute__((visibility("default"))) const char *glslang_default_resource_string(void) { return ""; }
@@ -147,16 +144,12 @@ jobs:
 
           "$CLANGXX" -shared -fPIC -O2 -static-libstdc++ -fvisibility=default             -Wl,--whole-archive "$SHADERC_A" "${EXTRA_LIBS[@]}" -Wl,--no-whole-archive             -Wl,--export-dynamic-symbol=glslang_decode_resource_limits             -Wl,--export-dynamic-symbol=glslang_default_resource             -Wl,--export-dynamic-symbol=glslang_default_resource_string             -Wl,--export-dynamic-symbol=glslang_resource             -Wl,-soname,libshaderc.so             -llog -landroid -lz -ldl -lm -latomic             -o "$OUT/libshaderc.so"
 
-          # vk_mem_alloc.h needs newer Vulkan headers than NDK 25 ships
-          # (VkBufferUsageFlags2CreateInfoKHR), so use current Khronos headers.
           git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git "$ROOT/vulkan-headers"
 
           mkdir -p "$ROOT/vma/include"
           curl -fsSL "https://raw.githubusercontent.com/LWJGL/lwjgl3/$LWJGL_VERSION/modules/lwjgl/vma/src/generated/c/org_lwjgl_util_vma_Vma.cpp"             -o "$ROOT/vma/org_lwjgl_util_vma_Vma.cpp"
           curl -fsSL "https://raw.githubusercontent.com/LWJGL/lwjgl3/$LWJGL_VERSION/modules/lwjgl/vma/src/main/c/vk_mem_alloc.h"             -o "$ROOT/vma/include/vk_mem_alloc.h"
 
-          # The generated sources call these macros without a trailing ';',
-          # so the semicolons have to be part of the macro (as in LWJGL's common_tools.h).
           cat > "$ROOT/vma/include/common_tools.h" <<'EOF'
           #pragma once
           #include <jni.h>
@@ -180,24 +173,35 @@ jobs:
           typedef void (*freePROC)(void*);
           typedef void* (*aligned_allocPROC)(size_t,size_t);
           typedef void (*aligned_freePROC)(void*);
+          extern mallocPROC org_lwjgl_malloc;
+          extern callocPROC org_lwjgl_calloc;
+          extern reallocPROC org_lwjgl_realloc;
+          extern freePROC org_lwjgl_free;
+          extern aligned_allocPROC org_lwjgl_aligned_alloc;
+          extern aligned_freePROC org_lwjgl_aligned_free;
+          #define LWJGL_MALLOC_LIB org_lwjgl_util_vma_LibVma
+          #define XSETUP_MALLOC(classPath) SETUP_MALLOC(classPath)
+          #define SETUP_MALLOC(classPath)           JNIEXPORT void JNICALL Java_##classPath##_setupMalloc(JNIEnv*, jclass, jlong malloc, jlong calloc, jlong realloc, jlong free, jlong aligned_alloc, jlong aligned_free) {             org_lwjgl_malloc=(mallocPROC)(uintptr_t)malloc;             org_lwjgl_calloc=(callocPROC)(uintptr_t)calloc;             org_lwjgl_realloc=(reallocPROC)(uintptr_t)realloc;             org_lwjgl_free=(freePROC)(uintptr_t)free;             org_lwjgl_aligned_alloc=(aligned_allocPROC)(uintptr_t)aligned_alloc;             org_lwjgl_aligned_free=(aligned_freePROC)(uintptr_t)aligned_free;           }
+          EOF
+
+          # Explicit setupMalloc TU — generated Vma.cpp does not always emit it.
+          cat > "$ROOT/vma/setup_malloc.cpp" <<'EOF'
+          #include "lwjgl_malloc.h"
           mallocPROC org_lwjgl_malloc;
           callocPROC org_lwjgl_calloc;
           reallocPROC org_lwjgl_realloc;
           freePROC org_lwjgl_free;
           aligned_allocPROC org_lwjgl_aligned_alloc;
           aligned_freePROC org_lwjgl_aligned_free;
-          #define LWJGL_MALLOC_LIB org_lwjgl_util_vma_LibVma
-          #define XSETUP_MALLOC(classPath) SETUP_MALLOC(classPath)
-          #define SETUP_MALLOC(classPath)           JNIEXPORT void JNICALL Java_##classPath##_setupMalloc(JNIEnv*, jclass, jlong malloc, jlong calloc, jlong realloc, jlong free, jlong aligned_alloc, jlong aligned_free) {             org_lwjgl_malloc=(mallocPROC)(uintptr_t)malloc;             org_lwjgl_calloc=(callocPROC)(uintptr_t)calloc;             org_lwjgl_realloc=(reallocPROC)(uintptr_t)realloc;             org_lwjgl_free=(freePROC)(uintptr_t)free;             org_lwjgl_aligned_alloc=(aligned_allocPROC)(uintptr_t)aligned_alloc;             org_lwjgl_aligned_free=(aligned_freePROC)(uintptr_t)aligned_free;           }
+          XSETUP_MALLOC(org_lwjgl_util_vma_LibVma)
           EOF
 
-          "$CLANGXX" -std=c++17 -fPIC -shared -O2 -static-libstdc++ -ferror-limit=0             -I"$ROOT/vma/include"             -I"$ROOT/vulkan-headers/include"             -Wl,-soname,libvma.so             "$ROOT/vma/org_lwjgl_util_vma_Vma.cpp"             -llog -landroid -o "$OUT/libvma.so"
+          "$CLANGXX" -std=c++17 -fPIC -shared -O2 -static-libstdc++ -fvisibility=default             -I"$ROOT/vma/include"             -I"$ROOT/vulkan-headers/include"             -Wl,-soname,libvma.so             "$ROOT/vma/org_lwjgl_util_vma_Vma.cpp"             "$ROOT/vma/setup_malloc.cpp"             -llog -landroid -o "$OUT/libvma.so"
 
-          # Compare public symbols LWJGL binds. Strip ELF symbol-version suffixes
-          # (e.g. Java_...@@LWJGL) so desktop versioned names match our unversioned
-          # Android exports. Also drop leading '_' (C++ / linker internals).
+          # Strip ELF symbol-version suffixes (@@LWJGL). Drop leading '_' and the
+          # bare version token "LWJGL" that remains after stripping.
           public_symbols() {
-            nm -D --defined-only "$1" | awk '{print $3}' | sed 's/@.*//' | { grep -v '^_' || true; } | sort -u
+            nm -D --defined-only "$1" | awk '{print $3}' | sed 's/@.*//' |             { grep -vE '^(_|LWJGL$)' || true; } | sort -u
           }
 
           for so in "$OUT"/*.so; do
