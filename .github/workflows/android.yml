@@ -4,10 +4,257 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      lwjgl_version:
+        description: 'LWJGL version used by the target Minecraft version (check libraries in its version JSON)'
+        required: false
+        default: '3.4.1'
+      shaderc_tag:
+        description: 'google/shaderc tag matching that LWJGL version (3.4.1 = v2026.1, 3.4.2 = v2026.2, 3.4.3 = v2026.3)'
+        required: false
+        default: 'v2026.1'
+
+permissions:
+  contents: read
+
+env:
+  ANDROID_NDK_VERSION: 25.2.9519653
+  ANDROID_PLATFORM: android-26
+  ANDROID_ABI: arm64-v8a
+  SPIRV_CROSS_TAG: vulkan-sdk-1.4.350.1
+  SHADERC_TAG: ${{ inputs.shaderc_tag || 'v2026.1' }}
+  LWJGL_VERSION: ${{ inputs.lwjgl_version || '3.4.1' }}
 
 jobs:
+  # Builds the Android arm64 native libraries Minecraft 26.2 / 26.3 needs
+  # (GLFW, SDL3, mojoexec, spirv-cross, shaderc, vma) once, then the APK jobs
+  # below drop them into jniLibs. If this job fails the APKs are still built,
+  # but their artifact name says "NO MC26 natives" so they are not mistaken
+  # for a working 26.x build.
+  Natives:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Android NDK
+        run: |
+          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" "ndk;$ANDROID_NDK_VERSION"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install native tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build cmake unzip binutils
+
+      - name: Build Android GLFW + SDL3 backend from MojoLauncher
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/.mojo-native"
+          DEST="$GITHUB_WORKSPACE/natives-out/arm64-v8a"
+          mkdir -p "$ROOT" "$DEST"
+          git clone --depth 1 --branch v3_openjdk --recurse-submodules https://github.com/MojoLauncher/MojoLauncher.git "$ROOT/MojoLauncher"
+
+          # -include stdbool.h: Mojo's C sources use bool/true/false without including it,
+          # which NDK 25's clang rejects (fake_dlfcn.c).
+          cmake -S "$ROOT/MojoLauncher/app_pojavlauncher/src/main/jni"             -B "$ROOT/build"             -GNinja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake"             -DANDROID_ABI="$ANDROID_ABI"             -DANDROID_PLATFORM="$ANDROID_PLATFORM"             -DANDROID_STL=c++_static             -DCMAKE_ANDROID_STL_TYPE=c++_static             -DCMAKE_C_FLAGS="-include stdbool.h"             -DGLFW_BUILD_WAYLAND=OFF             -DGLFW_BUILD_X11=OFF             -DGLFW_BUILD_ANDROID=ON             -DGLFW_BUILD_EXAMPLES=OFF             -DGLFW_BUILD_TESTS=OFF             -DGLFW_INSTALL=OFF             -DBUILD_SHARED_LIBS=ON             -DSDL_SHARED=ON             -DSDL_VIDEO=ON             -DSDL_AUDIO=ON             -DSDL_STATIC=OFF             -DSDL_CAMERA=OFF             -DSDL_TESTS=OFF             -DSDL_EXAMPLES=OFF             -DSDL3_MAINPROJECT=OFF
+
+          # -k 0: keep going after the first error so one run reports every failing file.
+          cmake --build "$ROOT/build" --target glfw SDL3-shared mojoexec -j2 -- -k 0
+
+          find "$ROOT/build" -type f -name 'libglfw.so' -exec cp {} "$DEST/" \;
+          find "$ROOT/build" -type f -name 'libSDL3.so' -exec cp {} "$DEST/" \;
+          find "$ROOT/build" -type f -name 'libmojoexec.so' -exec cp {} "$DEST/" \;
+
+          test -f "$DEST/libglfw.so"
+          test -f "$DEST/libSDL3.so"
+          test -f "$DEST/libmojoexec.so"
+
+          for so in "$DEST/libglfw.so" "$DEST/libSDL3.so" "$DEST/libmojoexec.so"; do
+            echo "==== $so ===="
+            file "$so"
+            readelf -d "$so" | grep NEEDED || true
+            ! readelf -d "$so" | grep -q 'libstdc++.so.6'
+            ! readelf -d "$so" | grep -q 'libc++_shared.so'
+          done
+
+      - name: Build Android arm64 LWJGL replacements
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "LWJGL_VERSION=$LWJGL_VERSION SHADERC_TAG=$SHADERC_TAG"
+          ROOT="$GITHUB_WORKSPACE/.mc26-native"
+          OUT="$ROOT/out"
+          DEST="$GITHUB_WORKSPACE/natives-out/arm64-v8a"
+          NDK="$ANDROID_NDK"
+          TOOLCHAIN="$NDK/build/cmake/android.toolchain.cmake"
+          CLANGXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++"
+          CLANG="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
+          mkdir -p "$OUT" "$DEST"
+
+          git clone --depth 1 --branch "$SPIRV_CROSS_TAG" https://github.com/KhronosGroup/SPIRV-Cross.git "$ROOT/spirv-cross"
+          cmake -S "$ROOT/spirv-cross" -B "$ROOT/spirv-cross-build" -GNinja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"             -DANDROID_ABI="$ANDROID_ABI"             -DANDROID_PLATFORM="$ANDROID_PLATFORM"             -DANDROID_STL=c++_static             -DCMAKE_ANDROID_STL_TYPE=c++_static             -DSPIRV_CROSS_CLI=OFF             -DSPIRV_CROSS_STATIC=OFF             -DSPIRV_CROSS_SHARED=ON             -DSPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS=ON
+          cmake --build "$ROOT/spirv-cross-build" --target spirv-cross-c-shared -j2
+          SPVC="$(find "$ROOT/spirv-cross-build" -type f -name 'libspirv-cross-c-shared.so' -print -quit)"
+          test -n "$SPVC"
+          cp "$SPVC" "$OUT/libspirv-cross.so"
+
+          git clone --depth 1 --branch "$SHADERC_TAG" https://github.com/google/shaderc.git "$ROOT/shaderc"
+          (cd "$ROOT/shaderc" && ./utils/git-sync-deps)
+          cmake -S "$ROOT/shaderc" -B "$ROOT/shaderc-build" -GNinja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"             -DANDROID_ABI="$ANDROID_ABI"             -DANDROID_PLATFORM="$ANDROID_PLATFORM"             -DANDROID_STL=c++_static             -DCMAKE_ANDROID_STL_TYPE=c++_static             -DSHADERC_SKIP_TESTS=ON             -DSHADERC_SKIP_EXAMPLES=ON             -DSHADERC_SKIP_COPYRIGHT_CHECK=ON             -DSHADERC_ENABLE_HLSL=ON             -DSHADERC_ENABLE_COMBINE=ON             -DBUILD_SHARED_LIBS=OFF             -DCMAKE_C_FLAGS="-fvisibility=default -DSHADERC_SHAREDLIB -DSHADERC_IMPLEMENTATION -DGLSLANG_IS_SHARED_LIBRARY -DGLSLANG_EXPORTING"             -DCMAKE_CXX_FLAGS="-fvisibility=default -DSHADERC_SHAREDLIB -DSHADERC_IMPLEMENTATION -DGLSLANG_IS_SHARED_LIBRARY -DGLSLANG_EXPORTING"
+          cmake --build "$ROOT/shaderc-build" --target shaderc_combined -j2
+          SHADERC_A="$(find "$ROOT/shaderc-build" -type f -name 'libshaderc_combined.a' -print -quit)"
+          test -n "$SHADERC_A"
+
+          # LWJGL desktop libshaderc.so also exports the glslang resource-limits C API.
+          EXTRA_LIBS=()
+          cmake --build "$ROOT/shaderc-build" --target glslang-default-resource-limits -j2 || true
+          RESLIM_A="$(find "$ROOT/shaderc-build" -type f -name 'libglslang-default-resource-limits.a' -print -quit || true)"
+          if [ -n "${RESLIM_A:-}" ]; then
+            echo "Using CMake target archive: $RESLIM_A"
+            EXTRA_LIBS+=("$RESLIM_A")
+          else
+            RESLIM_SRC="$(find "$ROOT/shaderc" -type f \( -name 'resource_limits_c.cpp' -o -name 'ResourceLimits.cpp' \) | head -1)"
+            echo "RESLIM_SRC=${RESLIM_SRC:-none}"
+            if [ -n "${RESLIM_SRC:-}" ]; then
+              GLSANG_INC="$(dirname "$(find "$ROOT/shaderc" -type d -name 'glslang' -path '*/third_party/glslang/glslang' | head -1)")"
+              "$CLANGXX" -c -fPIC -O2 -fvisibility=default                 -DGLSLANG_IS_SHARED_LIBRARY -DGLSLANG_EXPORTING                 -I"$GLSLANG_INC" -I"$ROOT/shaderc/libshaderc/include"                 "$RESLIM_SRC" -o "$ROOT/resource_limits.o"
+              EXTRA_LIBS+=("$ROOT/resource_limits.o")
+            else
+              echo "WARNING: no resource-limits source found; defining thin stubs"
+              cat > "$ROOT/glslang_reslim_stubs.c" <<'STUB'
+          #include <stddef.h>
+          typedef struct glslang_resource_s glslang_resource_t;
+          __attribute__((visibility("default"))) const glslang_resource_t *glslang_default_resource(void) { return NULL; }
+          __attribute__((visibility("default"))) const char *glslang_default_resource_string(void) { return ""; }
+          __attribute__((visibility("default"))) const glslang_resource_t *glslang_resource(void) { return NULL; }
+          __attribute__((visibility("default"))) void glslang_decode_resource_limits(glslang_resource_t *r, const char *s) { (void)r; (void)s; }
+          STUB
+              "$CLANG" -c -fPIC -O2 -fvisibility=default "$ROOT/glslang_reslim_stubs.c" -o "$ROOT/glslang_reslim_stubs.o"
+              EXTRA_LIBS+=("$ROOT/glslang_reslim_stubs.o")
+            fi
+          fi
+
+          "$CLANGXX" -shared -fPIC -O2 -static-libstdc++ -fvisibility=default             -Wl,--whole-archive "$SHADERC_A" "${EXTRA_LIBS[@]}" -Wl,--no-whole-archive             -Wl,--export-dynamic-symbol=glslang_decode_resource_limits             -Wl,--export-dynamic-symbol=glslang_default_resource             -Wl,--export-dynamic-symbol=glslang_default_resource_string             -Wl,--export-dynamic-symbol=glslang_resource             -Wl,-soname,libshaderc.so             -llog -landroid -lz -ldl -lm -latomic             -o "$OUT/libshaderc.so"
+
+          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git "$ROOT/vulkan-headers"
+
+          mkdir -p "$ROOT/vma/include"
+          curl -fsSL "https://raw.githubusercontent.com/LWJGL/lwjgl3/$LWJGL_VERSION/modules/lwjgl/vma/src/generated/c/org_lwjgl_util_vma_Vma.cpp"             -o "$ROOT/vma/org_lwjgl_util_vma_Vma.cpp"
+          curl -fsSL "https://raw.githubusercontent.com/LWJGL/lwjgl3/$LWJGL_VERSION/modules/lwjgl/vma/src/main/c/vk_mem_alloc.h"             -o "$ROOT/vma/include/vk_mem_alloc.h"
+
+          cat > "$ROOT/vma/include/common_tools.h" <<'EOF'
+          #pragma once
+          #include <jni.h>
+          #include <stdint.h>
+          #define DISABLE_WARNINGS()
+          #define ENABLE_WARNINGS()
+          #define EXTERN_C_ENTER extern "C" {
+          #define EXTERN_C_EXIT }
+          #define UNUSED_PARAM(a) (void)(a);
+          #define UNUSED_PARAMS(a,b) (void)(a); (void)(b);
+          EOF
+
+          cat > "$ROOT/vma/include/lwjgl_malloc.h" <<'EOF'
+          #pragma once
+          #include <jni.h>
+          #include <stddef.h>
+          #include <stdint.h>
+          typedef void* (*mallocPROC)(size_t);
+          typedef void* (*callocPROC)(size_t,size_t);
+          typedef void* (*reallocPROC)(void*,size_t);
+          typedef void (*freePROC)(void*);
+          typedef void* (*aligned_allocPROC)(size_t,size_t);
+          typedef void (*aligned_freePROC)(void*);
+          extern mallocPROC org_lwjgl_malloc;
+          extern callocPROC org_lwjgl_calloc;
+          extern reallocPROC org_lwjgl_realloc;
+          extern freePROC org_lwjgl_free;
+          extern aligned_allocPROC org_lwjgl_aligned_alloc;
+          extern aligned_freePROC org_lwjgl_aligned_free;
+          #define LWJGL_MALLOC_LIB org_lwjgl_util_vma_LibVma
+          #define XSETUP_MALLOC(classPath) SETUP_MALLOC(classPath)
+          #define SETUP_MALLOC(classPath)           JNIEXPORT void JNICALL Java_##classPath##_setupMalloc(JNIEnv*, jclass, jlong malloc, jlong calloc, jlong realloc, jlong free, jlong aligned_alloc, jlong aligned_free) {             org_lwjgl_malloc=(mallocPROC)(uintptr_t)malloc;             org_lwjgl_calloc=(callocPROC)(uintptr_t)calloc;             org_lwjgl_realloc=(reallocPROC)(uintptr_t)realloc;             org_lwjgl_free=(freePROC)(uintptr_t)free;             org_lwjgl_aligned_alloc=(aligned_allocPROC)(uintptr_t)aligned_alloc;             org_lwjgl_aligned_free=(aligned_freePROC)(uintptr_t)aligned_free;           }
+          EOF
+
+          # Explicit setupMalloc TU — generated Vma.cpp does not always emit it.
+          cat > "$ROOT/vma/setup_malloc.cpp" <<'EOF'
+          #include "lwjgl_malloc.h"
+          mallocPROC org_lwjgl_malloc;
+          callocPROC org_lwjgl_calloc;
+          reallocPROC org_lwjgl_realloc;
+          freePROC org_lwjgl_free;
+          aligned_allocPROC org_lwjgl_aligned_alloc;
+          aligned_freePROC org_lwjgl_aligned_free;
+          XSETUP_MALLOC(org_lwjgl_util_vma_LibVma)
+          EOF
+
+          "$CLANGXX" -std=c++17 -fPIC -shared -O2 -static-libstdc++ -fvisibility=default             -I"$ROOT/vma/include"             -I"$ROOT/vulkan-headers/include"             -Wl,-soname,libvma.so             "$ROOT/vma/org_lwjgl_util_vma_Vma.cpp"             "$ROOT/vma/setup_malloc.cpp"             -llog -landroid -o "$OUT/libvma.so"
+
+          # Strip ELF symbol-version suffixes (@@LWJGL). Drop leading '_' and the
+          # bare version token "LWJGL" that remains after stripping.
+          public_symbols() {
+            nm -D --defined-only "$1" | awk '{print $3}' | sed 's/@.*//' |             { grep -vE '^(_|LWJGL$)' || true; } | sort -u
+          }
+
+          for so in "$OUT"/*.so; do
+            echo "==== $so ===="
+            file "$so"
+            readelf -h "$so" | grep -E 'Class:|Machine:'
+            ! readelf -d "$so" | grep -q 'libstdc++.so.6'
+            ! readelf -d "$so" | grep -q 'libc++_shared.so'
+            public_symbols "$so" > "$so.symbols"
+          done
+
+          mkdir -p "$ROOT/reference"
+          for module in spvc shaderc vma; do
+            case "$module" in
+              spvc) lib="libspirv-cross.so" ;;
+              shaderc) lib="libshaderc.so" ;;
+              vma) lib="liblwjgl_vma.so" ;;
+            esac
+            ours="$lib"
+            if [ "$module" = "vma" ]; then ours="libvma.so"; fi
+            jar="$ROOT/reference/lwjgl-$module-$LWJGL_VERSION-natives-linux-arm64.jar"
+            curl -fsSL "https://repo1.maven.org/maven2/org/lwjgl/lwjgl-$module/$LWJGL_VERSION/lwjgl-$module-$LWJGL_VERSION-natives-linux-arm64.jar" -o "$jar"
+            unzip -qo "$jar" -d "$ROOT/reference/$module"
+            desktop="$(find "$ROOT/reference/$module" -type f -name "$lib" -print -quit)"
+            test -f "$desktop"
+            public_symbols "$desktop" > "$ROOT/reference/$module.desktop.symbols"
+            comm -23 "$ROOT/reference/$module.desktop.symbols" "$OUT/$ours.symbols" > "$ROOT/reference/$module.missing"
+            echo "$module: $(wc -l < "$ROOT/reference/$module.desktop.symbols") desktop public symbols, $(wc -l < "$ROOT/reference/$module.missing") missing"
+            if [ -s "$ROOT/reference/$module.missing" ]; then
+              echo "Missing LWJGL exports from $ours:"
+              cat "$ROOT/reference/$module.missing"
+              exit 1
+            fi
+          done
+
+          cp "$OUT/libspirv-cross.so" "$DEST/"
+          cp "$OUT/libshaderc.so" "$DEST/"
+          cp "$OUT/libvma.so" "$DEST/"
+
+      - name: Check all six native libraries exist
+        run: |
+          for lib in libglfw libSDL3 libmojoexec libspirv-cross libshaderc libvma; do
+            test -f "natives-out/arm64-v8a/$lib.so" || { echo "MISSING $lib.so"; exit 1; }
+          done
+          ls -l natives-out/arm64-v8a
+
+      - name: Upload natives for the APK jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-natives
+          path: natives-out/arm64-v8a/*.so
+          if-no-files-found: error
+
   BuildRelease:
-    if: github.repository_owner == 'ZalithLauncher' && !startsWith(github.ref, 'refs/pull/') && github.ref_name == 'main'
+    needs: Natives
+    if: ${{ !cancelled() && github.repository_owner == 'ZalithLauncher' && !startsWith(github.ref, 'refs/pull/') && github.ref_name == 'main' }}
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -41,6 +288,13 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Add Minecraft 26.x natives
+        if: needs.Natives.result == 'success' && (matrix.arch == 'arm64' || matrix.arch == 'all')
+        uses: actions/download-artifact@v4
+        with:
+          name: android-natives
+          path: ZalithLauncher/src/main/jniLibs/arm64-v8a
+
       - name: Build JRE JAR files
         run: |
           chmod +x gradlew
@@ -62,7 +316,8 @@ jobs:
           path: ZalithLauncher/build/outputs/apk/release/*
 
   BuildDebug:
-    if: startsWith(github.ref, 'refs/pull/') || github.ref_name != 'main' || github.repository_owner != 'ZalithLauncher'
+    needs: Natives
+    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/pull/') || github.ref_name != 'main' || github.repository_owner != 'ZalithLauncher') }}
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -79,6 +334,13 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Add Minecraft 26.x natives
+        if: needs.Natives.result == 'success' && (matrix.arch == 'arm64' || matrix.arch == 'all')
+        uses: actions/download-artifact@v4
+        with:
+          name: android-natives
+          path: ZalithLauncher/src/main/jniLibs/arm64-v8a
+
       - name: Build JRE JAR files
         run: |
           chmod +x gradlew
@@ -90,8 +352,32 @@ jobs:
           chmod +x gradlew
           ./gradlew ZalithLauncher:assembleDebug -Darch=${{ matrix.arch }}
 
+      - name: Verify Minecraft 26.x natives are packaged
+        if: needs.Natives.result == 'success' && (matrix.arch == 'arm64' || matrix.arch == 'all')
+        run: |
+          shopt -s nullglob
+          apks=(ZalithLauncher/build/outputs/apk/debug/*.apk)
+          test ${#apks[@]} -gt 0
+          for apk in "${apks[@]}"; do
+            for lib in libspirv-cross libshaderc libvma libglfw libSDL3 libmojoexec; do
+              unzip -l "$apk" | grep -q "lib/arm64-v8a/$lib.so" || { echo "MISSING $lib.so in $apk"; exit 1; }
+            done
+            echo "OK: all six native libraries are in $apk"
+          done
+
+      - name: Artifact label
+        id: label
+        run: |
+          label="${{ matrix.arch }}"
+          if [[ "${{ matrix.arch }}" == "arm64" || "${{ matrix.arch }}" == "all" ]]; then
+            if [[ "${{ needs.Natives.result }}" != "success" ]]; then
+              label="$label (NO MC26 natives)"
+            fi
+          fi
+          echo "label=$label" >> "$GITHUB_OUTPUT"
+
       - name: Upload Debug ${{matrix.arch}}
         uses: actions/upload-artifact@v4
         with:
-          name: ZalithLauncher(Debug) ${{ matrix.arch }}
+          name: ZalithLauncher(Debug) ${{ steps.label.outputs.label }}
           path: ZalithLauncher/build/outputs/apk/debug/*
