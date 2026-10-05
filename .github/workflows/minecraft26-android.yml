@@ -62,9 +62,12 @@ jobs:
           mkdir -p "$ROOT"
           git clone --depth 1 --branch v3_openjdk --recurse-submodules https://github.com/MojoLauncher/MojoLauncher.git "$ROOT/MojoLauncher"
 
-          cmake -S "$ROOT/MojoLauncher/app_pojavlauncher/src/main/jni"             -B "$ROOT/build"             -GNinja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake"             -DANDROID_ABI="$ANDROID_ABI"             -DANDROID_PLATFORM="$ANDROID_PLATFORM"             -DANDROID_STL=c++_static             -DCMAKE_ANDROID_STL_TYPE=c++_static             -DGLFW_BUILD_WAYLAND=OFF             -DGLFW_BUILD_X11=OFF             -DGLFW_BUILD_ANDROID=ON             -DGLFW_BUILD_EXAMPLES=OFF             -DGLFW_BUILD_TESTS=OFF             -DGLFW_INSTALL=OFF             -DBUILD_SHARED_LIBS=ON             -DSDL_SHARED=ON             -DSDL_VIDEO=ON             -DSDL_AUDIO=ON             -DSDL_STATIC=OFF             -DSDL_CAMERA=OFF             -DSDL_TESTS=OFF             -DSDL_EXAMPLES=OFF             -DSDL3_MAINPROJECT=OFF
+          # -include stdbool.h: Mojo's C sources use bool/true/false without including it,
+          # which NDK 25's clang rejects (fake_dlfcn.c).
+          cmake -S "$ROOT/MojoLauncher/app_pojavlauncher/src/main/jni"             -B "$ROOT/build"             -GNinja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake"             -DANDROID_ABI="$ANDROID_ABI"             -DANDROID_PLATFORM="$ANDROID_PLATFORM"             -DANDROID_STL=c++_static             -DCMAKE_ANDROID_STL_TYPE=c++_static             -DCMAKE_C_FLAGS="-include stdbool.h"             -DGLFW_BUILD_WAYLAND=OFF             -DGLFW_BUILD_X11=OFF             -DGLFW_BUILD_ANDROID=ON             -DGLFW_BUILD_EXAMPLES=OFF             -DGLFW_BUILD_TESTS=OFF             -DGLFW_INSTALL=OFF             -DBUILD_SHARED_LIBS=ON             -DSDL_SHARED=ON             -DSDL_VIDEO=ON             -DSDL_AUDIO=ON             -DSDL_STATIC=OFF             -DSDL_CAMERA=OFF             -DSDL_TESTS=OFF             -DSDL_EXAMPLES=OFF             -DSDL3_MAINPROJECT=OFF
 
-          cmake --build "$ROOT/build" --target glfw SDL3-shared mojoexec -j2
+          # -k 0: keep going after the first error so one run reports every failing file.
+          cmake --build "$ROOT/build" --target glfw SDL3-shared mojoexec -j2 -- -k 0
 
           mkdir -p ZalithLauncher/src/main/jniLibs/arm64-v8a
           find "$ROOT/build" -type f -name 'libglfw.so' -exec cp {} ZalithLauncher/src/main/jniLibs/arm64-v8a/ \;
