@@ -27,10 +27,10 @@ env:
 
 jobs:
   # Builds the Android arm64 native libraries Minecraft 26.2 / 26.3 needs
-  # (GLFW, SDL3, mojoexec, spirv-cross, shaderc, vma) once, then the APK jobs
-  # below drop them into jniLibs. If this job fails the APKs are still built,
-  # but their artifact name says "NO MC26 natives" so they are not mistaken
-  # for a working 26.x build.
+  # (GLFW, SDL3, mojoexec, spirv-cross, shaderc, vma, plus LWJGL 3.4.1 JNI libs)
+  # once, then the APK jobs below drop them into jniLibs. If this job fails the
+  # APKs are still built, but their artifact name says "NO MC26 natives" so they
+  # are not mistaken for a working 26.x build.
   Natives:
     runs-on: ubuntu-22.04
     steps:
@@ -242,9 +242,52 @@ jobs:
           cp "$OUT/libshaderc.so" "$DEST/"
           cp "$OUT/libvma.so" "$DEST/"
 
-      - name: Check all six native libraries exist
+      # LWJGL 3.4.x needs a liblwjgl.so built from 3.4.x sources (it contains libffi, which
+      # LWJGL's upcalls use). The liblwjgl*.so already in the app are 3.3-era builds shared with
+      # older Minecraft versions, so these go into the APK under libmc26_* names and the launcher
+      # copies them to the names LWJGL expects (see LaunchArgs.prepareLwjgl341Natives).
+      # Pinned to MojoLauncher's unilwjgl3-builder v3.4.1-r6 Android builds (sha1-checked).
+      - name: Fetch Android LWJGL 3.4.1 JNI libraries (MojoLauncher builds)
+        shell: bash
         run: |
-          for lib in libglfw libSDL3 libmojoexec libspirv-cross libshaderc libvma; do
+          set -euo pipefail
+          DEST="$GITHUB_WORKSPACE/natives-out/arm64-v8a"
+          TMP="$GITHUB_WORKSPACE/.mojo-lwjgl-natives"
+          BASE="https://github.com/MojoLauncher/unilwjgl3-builder/releases/download/v3.4.1-r6"
+          mkdir -p "$DEST" "$TMP"
+
+          fetch() {
+            jar="$1"; sha="$2"; so_name="$3"; packaged="$4"
+            curl -fsSL "$BASE/$jar" -o "$TMP/$jar"
+            echo "$sha  $TMP/$jar" | sha1sum -c -
+            mkdir -p "$TMP/x-$jar"
+            unzip -qo "$TMP/$jar" -d "$TMP/x-$jar"
+            so="$(find "$TMP/x-$jar" -type f -name "$so_name" -print -quit)"
+            test -n "$so" || { echo "$so_name not found in $jar"; find "$TMP/x-$jar" -type f; exit 1; }
+            cp "$so" "$DEST/$packaged"
+          }
+
+          fetch lwjgl-natives-linux-arm64-3.4.1.jar 3c32c800a64c9110f980072b08b9bb6e4c02fe03 liblwjgl.so libmc26_lwjgl.so
+          fetch lwjgl-opengl-natives-linux-arm64-3.4.1.jar 09e4cb58d9f946737aec6bb37add7b0148872770 liblwjgl_opengl.so libmc26_lwjgl_opengl.so
+          fetch lwjgl-stb-natives-linux-arm64-3.4.1.jar 8ba35d3e924102010a46c5b252610516f118ad0f liblwjgl_stb.so libmc26_lwjgl_stb.so
+          fetch lwjgl-tinyfd-natives-linux-arm64-3.4.1.jar 4a6931777ce4d6bc0d0b05b1e36b251bde2693df liblwjgl_tinyfd.so libmc26_lwjgl_tinyfd.so
+
+          for so in "$DEST"/libmc26_*.so; do
+            echo "==== $so ===="
+            file "$so"
+            readelf -h "$so" | grep -E 'Class:|Machine:'
+            # Android build: must not depend on glibc
+            ! readelf -d "$so" | grep -q 'libc.so.6'
+          done
+
+          # This is the exact function the game crashed on (UnsatisfiedLinkError).
+          nm -D --defined-only "$DEST/libmc26_lwjgl.so" | grep -q 'Java_org_lwjgl_system_libffi_LibFFI_ffi_1get_1closure_1size' \
+            || { echo "libmc26_lwjgl.so has no libffi JNI exports - Mojo's liblwjgl.so is not what we assumed"; nm -D --defined-only "$DEST/libmc26_lwjgl.so" | head -80; exit 1; }
+          echo "libffi JNI exports present"
+
+      - name: Check all native libraries exist
+        run: |
+          for lib in libglfw libSDL3 libmojoexec libspirv-cross libshaderc libvma libmc26_lwjgl libmc26_lwjgl_opengl libmc26_lwjgl_stb libmc26_lwjgl_tinyfd; do
             test -f "natives-out/arm64-v8a/$lib.so" || { echo "MISSING $lib.so"; exit 1; }
           done
           ls -l natives-out/arm64-v8a
@@ -363,10 +406,10 @@ jobs:
           apks=(ZalithLauncher/build/outputs/apk/debug/*.apk)
           test ${#apks[@]} -gt 0
           for apk in "${apks[@]}"; do
-            for lib in libspirv-cross libshaderc libvma libglfw libSDL3 libmojoexec; do
+            for lib in libspirv-cross libshaderc libvma libglfw libSDL3 libmojoexec libmc26_lwjgl libmc26_lwjgl_opengl libmc26_lwjgl_stb libmc26_lwjgl_tinyfd; do
               unzip -l "$apk" | grep -q "lib/arm64-v8a/$lib.so" || { echo "MISSING $lib.so in $apk"; exit 1; }
             done
-            echo "OK: all six native libraries are in $apk"
+            echo "OK: all native libraries are in $apk"
           done
 
       - name: Artifact label
