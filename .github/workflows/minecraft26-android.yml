@@ -193,10 +193,12 @@ jobs:
 
           "$CLANGXX" -std=c++17 -fPIC -shared -O2 -static-libstdc++ -ferror-limit=0             -I"$ROOT/vma/include"             -I"$ROOT/vulkan-headers/include"             -Wl,-soname,libvma.so             "$ROOT/vma/org_lwjgl_util_vma_Vma.cpp"             -llog -landroid -o "$OUT/libvma.so"
 
-          # Only compare the public symbols LWJGL actually binds (spvc_*, shaderc_*, Java_*).
-          # Names starting with '_' are C++ standard-library template instantiations and linker
-          # symbols (_init, _fini, _Z...) that desktop libstdc++ builds export and Android's don't.
-          public_symbols() { nm -D --defined-only "$1" | awk '{print $3}' | { grep -v '^_' || true; } | sort -u; }
+          # Compare public symbols LWJGL binds. Strip ELF symbol-version suffixes
+          # (e.g. Java_...@@LWJGL) so desktop versioned names match our unversioned
+          # Android exports. Also drop leading '_' (C++ / linker internals).
+          public_symbols() {
+            nm -D --defined-only "$1" | awk '{print $3}' | sed 's/@.*//' | { grep -v '^_' || true; } | sort -u
+          }
 
           for so in "$OUT"/*.so; do
             echo "==== $so ===="
