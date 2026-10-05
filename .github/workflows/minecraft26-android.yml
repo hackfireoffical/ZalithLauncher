@@ -107,11 +107,14 @@ jobs:
 
           git clone --depth 1 --branch "$SHADERC_TAG" https://github.com/google/shaderc.git "$ROOT/shaderc"
           (cd "$ROOT/shaderc" && ./utils/git-sync-deps)
-          cmake -S "$ROOT/shaderc" -B "$ROOT/shaderc-build" -GNinja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"             -DANDROID_ABI="$ANDROID_ABI"             -DANDROID_PLATFORM="$ANDROID_PLATFORM"             -DANDROID_STL=c++_static             -DCMAKE_ANDROID_STL_TYPE=c++_static             -DSHADERC_SKIP_TESTS=ON             -DSHADERC_SKIP_EXAMPLES=ON             -DSHADERC_SKIP_COPYRIGHT_CHECK=ON             -DSHADERC_ENABLE_HLSL=ON             -DSHADERC_ENABLE_COMBINE=ON             -DBUILD_SHARED_LIBS=OFF
-          cmake --build "$ROOT/shaderc-build" --target shaderc_combined -j2
-          SHADERC_A="$(find "$ROOT/shaderc-build" -type f -name 'libshaderc_combined.a' -print -quit)"
-          test -n "$SHADERC_A"
-          "$CLANGXX" -shared -fPIC -O2 -static-libstdc++             -Wl,--whole-archive "$SHADERC_A" -Wl,--no-whole-archive             -Wl,-soname,libshaderc.so             -llog -landroid -lz -ldl -lm -latomic             -o "$OUT/libshaderc.so"
+          # Build a real shared library so SHADERC_SHAREDLIB is defined and the C API
+          # symbols get default visibility (required by LWJGL). The previous
+          # static-combined + --whole-archive approach left the symbols hidden.
+          cmake -S "$ROOT/shaderc" -B "$ROOT/shaderc-build" -GNinja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"             -DANDROID_ABI="$ANDROID_ABI"             -DANDROID_PLATFORM="$ANDROID_PLATFORM"             -DANDROID_STL=c++_static             -DCMAKE_ANDROID_STL_TYPE=c++_static             -DSHADERC_SKIP_TESTS=ON             -DSHADERC_SKIP_EXAMPLES=ON             -DSHADERC_SKIP_COPYRIGHT_CHECK=ON             -DSHADERC_ENABLE_HLSL=ON             -DBUILD_SHARED_LIBS=ON
+          cmake --build "$ROOT/shaderc-build" --target shaderc_shared -j2
+          SHADERC_SO="$(find "$ROOT/shaderc-build" -type f \( -name 'libshaderc.so' -o -name 'libshaderc_shared.so' \) -print -quit)"
+          test -n "$SHADERC_SO"
+          cp "$SHADERC_SO" "$OUT/libshaderc.so"
 
           # vk_mem_alloc.h needs newer Vulkan headers than NDK 25 ships
           # (VkBufferUsageFlags2CreateInfoKHR), so use current Khronos headers.
