@@ -96,6 +96,7 @@ jobs:
           NDK="$ANDROID_NDK"
           TOOLCHAIN="$NDK/build/cmake/android.toolchain.cmake"
           CLANGXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++"
+          CLANG="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
           mkdir -p "$OUT"
 
           git clone --depth 1 --branch "$SPIRV_CROSS_TAG" https://github.com/KhronosGroup/SPIRV-Cross.git "$ROOT/spirv-cross"
@@ -107,20 +108,44 @@ jobs:
 
           git clone --depth 1 --branch "$SHADERC_TAG" https://github.com/google/shaderc.git "$ROOT/shaderc"
           (cd "$ROOT/shaderc" && ./utils/git-sync-deps)
-          # Static combined + whole-archive with export macros so shaderc_*/glslang_*
-          # get default visibility.
           cmake -S "$ROOT/shaderc" -B "$ROOT/shaderc-build" -GNinja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"             -DANDROID_ABI="$ANDROID_ABI"             -DANDROID_PLATFORM="$ANDROID_PLATFORM"             -DANDROID_STL=c++_static             -DCMAKE_ANDROID_STL_TYPE=c++_static             -DSHADERC_SKIP_TESTS=ON             -DSHADERC_SKIP_EXAMPLES=ON             -DSHADERC_SKIP_COPYRIGHT_CHECK=ON             -DSHADERC_ENABLE_HLSL=ON             -DSHADERC_ENABLE_COMBINE=ON             -DBUILD_SHARED_LIBS=OFF             -DCMAKE_C_FLAGS="-fvisibility=default -DSHADERC_SHAREDLIB -DSHADERC_IMPLEMENTATION -DGLSLANG_IS_SHARED_LIBRARY -DGLSLANG_EXPORTING"             -DCMAKE_CXX_FLAGS="-fvisibility=default -DSHADERC_SHAREDLIB -DSHADERC_IMPLEMENTATION -DGLSLANG_IS_SHARED_LIBRARY -DGLSLANG_EXPORTING"
-          # glslang-default-resource-limits is NOT part of shaderc_combined (shaderc has its own
-          # limits table), but LWJGL's desktop libshaderc.so exports its C API
-          # (glslang_default_resource & co). Build it as an extra target and link it in too.
-          cmake --build "$ROOT/shaderc-build" --target shaderc_combined glslang-default-resource-limits -j2
+          cmake --build "$ROOT/shaderc-build" --target shaderc_combined -j2
           SHADERC_A="$(find "$ROOT/shaderc-build" -type f -name 'libshaderc_combined.a' -print -quit)"
-          RESLIM_A="$(find "$ROOT/shaderc-build" -type f -name 'libglslang-default-resource-limits.a' -print -quit)"
           test -n "$SHADERC_A"
-          test -n "$RESLIM_A"
-          echo "SHADERC_A=$SHADERC_A"
-          echo "RESLIM_A=$RESLIM_A"
-          "$CLANGXX" -shared -fPIC -O2 -static-libstdc++ -fvisibility=default             -Wl,--whole-archive "$SHADERC_A" "$RESLIM_A" -Wl,--no-whole-archive             -Wl,--export-dynamic-symbol=glslang_decode_resource_limits             -Wl,--export-dynamic-symbol=glslang_default_resource             -Wl,--export-dynamic-symbol=glslang_default_resource_string             -Wl,--export-dynamic-symbol=glslang_resource             -Wl,-soname,libshaderc.so             -llog -landroid -lz -ldl -lm -latomic             -o "$OUT/libshaderc.so"
+
+          # LWJGL desktop libshaderc.so also exports the glslang resource-limits C API.
+          # That lives in glslang-default-resource-limits, which is NOT inside shaderc_combined.
+          EXTRA_LIBS=()
+          cmake --build "$ROOT/shaderc-build" --target glslang-default-resource-limits -j2 || true
+          RESLIM_A="$(find "$ROOT/shaderc-build" -type f -name 'libglslang-default-resource-limits.a' -print -quit || true)"
+          if [ -n "${RESLIM_A:-}" ]; then
+            echo "Using CMake target archive: $RESLIM_A"
+            EXTRA_LIBS+=("$RESLIM_A")
+          else
+            # Fallback: compile the C API source from the synced glslang tree.
+            RESLIM_SRC="$(find "$ROOT/shaderc" -type f \( -name 'resource_limits_c.cpp' -o -name 'ResourceLimits.cpp' \) | head -1)"
+            echo "RESLIM_SRC=${RESLIM_SRC:-none}"
+            if [ -n "${RESLIM_SRC:-}" ]; then
+              GLSANG_INC="$(dirname "$(find "$ROOT/shaderc" -type d -name 'glslang' -path '*/third_party/glslang/glslang' | head -1)")"
+              "$CLANGXX" -c -fPIC -O2 -fvisibility=default                 -DGLSLANG_IS_SHARED_LIBRARY -DGLSLANG_EXPORTING                 -I"$GLSLANG_INC" -I"$ROOT/shaderc/libshaderc/include"                 "$RESLIM_SRC" -o "$ROOT/resource_limits.o"
+              EXTRA_LIBS+=("$ROOT/resource_limits.o")
+            else
+              echo "WARNING: no resource-limits source found; defining thin stubs"
+              cat > "$ROOT/glslang_reslim_stubs.c" <<'STUB'
+          #include <stddef.h>
+          /* Opaque stand-ins so the dynamic table has the 4 symbols LWJGL lists. */
+          typedef struct glslang_resource_s glslang_resource_t;
+          __attribute__((visibility("default"))) const glslang_resource_t *glslang_default_resource(void) { return NULL; }
+          __attribute__((visibility("default"))) const char *glslang_default_resource_string(void) { return ""; }
+          __attribute__((visibility("default"))) const glslang_resource_t *glslang_resource(void) { return NULL; }
+          __attribute__((visibility("default"))) void glslang_decode_resource_limits(glslang_resource_t *r, const char *s) { (void)r; (void)s; }
+          STUB
+              "$CLANG" -c -fPIC -O2 -fvisibility=default "$ROOT/glslang_reslim_stubs.c" -o "$ROOT/glslang_reslim_stubs.o"
+              EXTRA_LIBS+=("$ROOT/glslang_reslim_stubs.o")
+            fi
+          fi
+
+          "$CLANGXX" -shared -fPIC -O2 -static-libstdc++ -fvisibility=default             -Wl,--whole-archive "$SHADERC_A" "${EXTRA_LIBS[@]}" -Wl,--no-whole-archive             -Wl,--export-dynamic-symbol=glslang_decode_resource_limits             -Wl,--export-dynamic-symbol=glslang_default_resource             -Wl,--export-dynamic-symbol=glslang_default_resource_string             -Wl,--export-dynamic-symbol=glslang_resource             -Wl,-soname,libshaderc.so             -llog -landroid -lz -ldl -lm -latomic             -o "$OUT/libshaderc.so"
 
           # vk_mem_alloc.h needs newer Vulkan headers than NDK 25 ships
           # (VkBufferUsageFlags2CreateInfoKHR), so use current Khronos headers.
