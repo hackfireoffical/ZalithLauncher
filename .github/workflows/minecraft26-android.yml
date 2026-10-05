@@ -107,26 +107,14 @@ jobs:
 
           git clone --depth 1 --branch "$SHADERC_TAG" https://github.com/google/shaderc.git "$ROOT/shaderc"
           (cd "$ROOT/shaderc" && ./utils/git-sync-deps)
-          # Static combined archive packs every dependency. A linker version script
-          # then forces the C API symbols into the dynamic table of the final .so
-          # (shaderc_* + glslang_*), matching LWJGL desktop natives.
+          # Static combined + whole-archive. Define the shared-lib export macros so
+          # shaderc_* / glslang_* get default visibility; -fvisibility=default covers
+          # the rest. Do NOT use a version script with local:* — that hid spv*/StageName.
           cmake -S "$ROOT/shaderc" -B "$ROOT/shaderc-build" -GNinja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"             -DANDROID_ABI="$ANDROID_ABI"             -DANDROID_PLATFORM="$ANDROID_PLATFORM"             -DANDROID_STL=c++_static             -DCMAKE_ANDROID_STL_TYPE=c++_static             -DSHADERC_SKIP_TESTS=ON             -DSHADERC_SKIP_EXAMPLES=ON             -DSHADERC_SKIP_COPYRIGHT_CHECK=ON             -DSHADERC_ENABLE_HLSL=ON             -DSHADERC_ENABLE_COMBINE=ON             -DBUILD_SHARED_LIBS=OFF             -DCMAKE_C_FLAGS="-fvisibility=default -DSHADERC_SHAREDLIB -DSHADERC_IMPLEMENTATION -DGLSLANG_IS_SHARED_LIBRARY -DGLSLANG_EXPORTING"             -DCMAKE_CXX_FLAGS="-fvisibility=default -DSHADERC_SHAREDLIB -DSHADERC_IMPLEMENTATION -DGLSLANG_IS_SHARED_LIBRARY -DGLSLANG_EXPORTING"
           cmake --build "$ROOT/shaderc-build" --target shaderc_combined -j2
           SHADERC_A="$(find "$ROOT/shaderc-build" -type f -name 'libshaderc_combined.a' -print -quit)"
           test -n "$SHADERC_A"
-
-          cat > "$ROOT/shaderc.exports" <<'EOF'
-          {
-            global:
-              shaderc_*;
-              glslang_*;
-              Sh*;
-            local:
-              *;
-          };
-          EOF
-
-          "$CLANGXX" -shared -fPIC -O2 -static-libstdc++ -fvisibility=default             -Wl,--whole-archive "$SHADERC_A" -Wl,--no-whole-archive             -Wl,--version-script="$ROOT/shaderc.exports"             -Wl,-soname,libshaderc.so             -llog -landroid -lz -ldl -lm -latomic             -o "$OUT/libshaderc.so"
+          "$CLANGXX" -shared -fPIC -O2 -static-libstdc++ -fvisibility=default             -Wl,--whole-archive "$SHADERC_A" -Wl,--no-whole-archive             -Wl,-soname,libshaderc.so             -llog -landroid -lz -ldl -lm -latomic             -o "$OUT/libshaderc.so"
 
           # vk_mem_alloc.h needs newer Vulkan headers than NDK 25 ships
           # (VkBufferUsageFlags2CreateInfoKHR), so use current Khronos headers.
