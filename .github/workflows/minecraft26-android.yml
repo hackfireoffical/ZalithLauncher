@@ -159,13 +159,18 @@ jobs:
 
           "$CLANGXX" -std=c++17 -fPIC -shared -O2 -static-libstdc++ -ferror-limit=0             -I"$ROOT/vma/include"             -I"$ROOT/vulkan-headers/include"             -Wl,-soname,libvma.so             "$ROOT/vma/org_lwjgl_util_vma_Vma.cpp"             -llog -landroid -o "$OUT/libvma.so"
 
+          # Only compare the public symbols LWJGL actually binds (spvc_*, shaderc_*, Java_*).
+          # Names starting with '_' are C++ standard-library template instantiations and linker
+          # symbols (_init, _fini, _Z...) that desktop libstdc++ builds export and Android's don't.
+          public_symbols() { nm -D --defined-only "$1" | awk '{print $3}' | { grep -v '^_' || true; } | sort -u; }
+
           for so in "$OUT"/*.so; do
             echo "==== $so ===="
             file "$so"
             readelf -h "$so" | grep -E 'Class:|Machine:'
             ! readelf -d "$so" | grep -q 'libstdc++.so.6'
             ! readelf -d "$so" | grep -q 'libc++_shared.so'
-            nm -D --defined-only "$so" | awk '{print $3}' | sort -u > "$so.symbols"
+            public_symbols "$so" > "$so.symbols"
           done
 
           mkdir -p "$ROOT/reference"
@@ -175,15 +180,18 @@ jobs:
               shaderc) lib="libshaderc.so" ;;
               vma) lib="liblwjgl_vma.so" ;;
             esac
+            ours="$lib"
+            if [ "$module" = "vma" ]; then ours="libvma.so"; fi
             jar="$ROOT/reference/lwjgl-$module-$LWJGL_VERSION-natives-linux-arm64.jar"
             curl -fsSL "https://repo1.maven.org/maven2/org/lwjgl/lwjgl-$module/$LWJGL_VERSION/lwjgl-$module-$LWJGL_VERSION-natives-linux-arm64.jar" -o "$jar"
             unzip -qo "$jar" -d "$ROOT/reference/$module"
             desktop="$(find "$ROOT/reference/$module" -type f -name "$lib" -print -quit)"
             test -f "$desktop"
-            nm -D --defined-only "$desktop" | awk '{print $3}' | sort -u > "$ROOT/reference/$module.desktop.symbols"
-            comm -23 "$ROOT/reference/$module.desktop.symbols" "$OUT/$lib.symbols" > "$ROOT/reference/$module.missing"
+            public_symbols "$desktop" > "$ROOT/reference/$module.desktop.symbols"
+            comm -23 "$ROOT/reference/$module.desktop.symbols" "$OUT/$ours.symbols" > "$ROOT/reference/$module.missing"
+            echo "$module: $(wc -l < "$ROOT/reference/$module.desktop.symbols") desktop public symbols, $(wc -l < "$ROOT/reference/$module.missing") missing"
             if [ -s "$ROOT/reference/$module.missing" ]; then
-              echo "Missing LWJGL exports from $lib:"
+              echo "Missing LWJGL exports from $ours:"
               cat "$ROOT/reference/$module.missing"
               exit 1
             fi
