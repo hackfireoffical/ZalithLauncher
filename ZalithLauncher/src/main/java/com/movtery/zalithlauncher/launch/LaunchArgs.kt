@@ -54,8 +54,6 @@ class LaunchArgs(
      * which call into a real libglfw.so. On Android there is no such library: the launcher
      * implements GLFW itself (lwjgl-glfw-classes.jar, a Java GLFW that talks to libpojavexec.so).
      * Put that bridge in front so its org.lwjgl.glfw.GLFW wins over the official one.
-     * (The Mojo GLFW build that was tried before needs MojoLauncher's own activity/runtime and
-     * segfaults inside libglfw.so when started from this launcher.)
      */
     private fun withAndroidGlfwBridge(lwjglClassPath: String): String {
         if (!isMinecraft26Native()) return lwjglClassPath
@@ -86,11 +84,6 @@ class LaunchArgs(
         val configFilePath = if (is7) LibPath.LOG4J_XML_1_7 else LibPath.LOG4J_XML_1_12
         argsList.add("-Dlog4j.configurationFile=${configFilePath.absolutePath}")
 
-        // Minecraft 26.2 / 26.3 use LWJGL 3.4.x modules (spvc, shaderc, vma) whose desktop
-        // Linux ARM64 natives cannot run on Android. Use the Android-native copies bundled
-        // in the APK instead of the copies extracted from the game JARs.
-        // 26.3 snapshot 5+ also compiles shaders with ShaderC on OpenGL, so libshaderc.so
-        // is required even when the OpenGL backend is forced.
         if (isMinecraft26Native()) {
             val androidNativeDir = PathManager.DIR_NATIVE_LIB
             val lwjglExtractDir = File(
@@ -99,28 +92,14 @@ class LaunchArgs(
             )
             lwjglExtractDir.mkdirs()
 
-            // LWJGL 3.4.x needs a liblwjgl.so built from 3.4.x sources (it contains libffi,
-            // used by LWJGL's upcalls). The liblwjgl*.so in the app's lib dir are 3.3-era builds
-            // shared with older Minecraft versions and lack those functions
-            // (UnsatisfiedLinkError: LibFFI / Callback.getCallbackHandler).
-            // The 3.4.1 Android builds ship under libmc26_* names; copy them to the names
-            // LWJGL expects and prefer that private dir.
             val lwjgl341Dir = prepareLwjgl341Natives()
 
-            // Keep LWJGL extraction and lookup entirely inside Android-writable
-            // directories. The game JSON may point at desktop-native locations,
-            // so these properties must be the final values.
             argsList.add("-Dorg.lwjgl.system.SharedLibraryExtractPath=${lwjglExtractDir.absolutePath}")
-            // Only point librarypath at lwjgl-jni when every required .so is present.
-            // Otherwise fall back to the APK native dir (still better than broken files).
             argsList.add("-Dorg.lwjgl.librarypath=${lwjgl341Dir ?: androidNativeDir}")
             argsList.add("-Dorg.lwjgl.spvc.libname=$androidNativeDir/libspirv-cross.so")
             argsList.add("-Dorg.lwjgl.shaderc.libname=$androidNativeDir/libshaderc.so")
             argsList.add("-Dorg.lwjgl.vma.libname=$androidNativeDir/libvma.so")
 
-            // Diagnostics while 26.x support is being brought up: print the full JVM crash
-            // report (hs_err) into the game log instead of a file in a folder that apps
-            // can't browse on newer Android, and log which native library LWJGL fails to load.
             argsList.add("-XX:+ErrorFileToStdout")
             argsList.add("-Dorg.lwjgl.util.DebugLoader=true")
         }
@@ -135,13 +114,9 @@ class LaunchArgs(
     }
 
     /**
-     * Copies the Android-built LWJGL 3.4.1 JNI libraries (packaged in the APK as
-     * libmc26_*.so by the Android CI Natives job) to `game-native/<version>/lwjgl-jni`
-     * under the file names LWJGL looks for.
-     *
-     * Returns the directory only when **all** required libraries were copied and are
-     * non-empty. A partial copy previously left "unknown type" files that still
-     * produced UnsatisfiedLinkError on Callback.getCallbackHandler.
+     * Copies Android CI libmc26_*.so into game-native/<ver>/lwjgl-jni under the
+     * names LWJGL expects. Returns that dir only when every required library is
+     * present and non-empty; otherwise null so we never point at "unknown type" junk.
      */
     private fun prepareLwjgl341Natives(): String? {
         val srcDir = File(PathManager.DIR_NATIVE_LIB)
@@ -150,13 +125,11 @@ class LaunchArgs(
             "game-native/${minecraftVersion.getVersionName()}/lwjgl-jni"
         )
 
-        // All packaged sources must exist and be non-empty before we trust the dest dir.
         val sources = LWJGL_341_JNI_LIBS.map { (packagedName, lwjglName) ->
             Triple(File(srcDir, packagedName), File(destDir, lwjglName), lwjglName)
         }
         val missing = sources.filter { (src, _, _) -> !src.isFile || src.length() < 1024L }
         if (missing.isNotEmpty()) {
-            // Incomplete APK (Natives job skipped / old build). Do not point LWJGL at junk.
             return null
         }
 
@@ -166,7 +139,6 @@ class LaunchArgs(
             for ((src, dest, _) in sources) {
                 src.copyTo(dest, overwrite = true)
                 if (!dest.isFile || dest.length() < 1024L) {
-                    // Copy produced an empty/corrupt file — wipe and abort.
                     destDir.deleteRecursively()
                     return null
                 }
@@ -203,9 +175,6 @@ class LaunchArgs(
         }
         val result = JSONUtils.insertJSONValueList(minecraftArgs.toTypedArray<String>(), varArgMap).toMutableList()
 
-        // Minecraft 26.2+ may provide native/temp paths pointing into Android's
-        // installed APK lib directory. That directory is read-only and must not
-        // be used for LWJGL/JNA/Netty extraction or native library lookup.
         val nativeDir = File(
             PathManager.DIR_CACHE,
             "natives/${minecraftVersion.getVersionName()}"
@@ -215,12 +184,8 @@ class LaunchArgs(
             "game-native/${minecraftVersion.getVersionName()}"
         ).absolutePath
 
-        // LWJGL fails with "Failed to find an appropriate directory to extract the
-        // native library" when its extract path does not exist yet, so create them.
         listOf("lwjgl", "lwjgl-jni", "jna", "netty").forEach { File(nativeWorkDir, it).mkdirs() }
 
-        // Remove conflicting values supplied by the Minecraft version JSON.
-        // These properties are order-sensitive: the final value wins.
         result.removeAll {
             it.startsWith("-Djava.library.path=") ||
             it.startsWith("-Djna.boot.library.path=") ||
@@ -230,8 +195,6 @@ class LaunchArgs(
             it.startsWith("-Dio.netty.native.workdir=")
         }
 
-        // Put Android-writable locations back as the final JVM properties.
-        // Prefer the prepared 3.4.1 jni dir first when present.
         val lwjglJni = File(nativeWorkDir, "lwjgl-jni")
         val libraryPathParts = buildList {
             if (File(lwjglJni, "liblwjgl.so").isFile) add(lwjglJni.absolutePath)
@@ -248,13 +211,6 @@ class LaunchArgs(
         return result.toTypedArray()
     }
 
-    /**
-     * Minecraft 26.2+ supports forcing the graphics backend with
-     * --graphicsBackend <opengl|vulkan>. This is stronger than the
-     * preferredGraphicsBackend value in options.txt and prevents Minecraft
-     * from probing/using the wrong backend on devices where Vulkan classes
-     * are unavailable.
-     */
     private fun getGraphicsBackendArgs(): List<String> {
         if (!isMinecraft26Native()) return emptyList()
 
@@ -286,7 +242,6 @@ class LaunchArgs(
 
         val minecraftArgs: MutableList<String> = ArrayList()
         versionInfo.arguments?.apply {
-            // Support Minecraft 1.13+
             game.forEach { if (it is String) minecraftArgs.add(it) }
         }
 
@@ -314,11 +269,6 @@ class LaunchArgs(
         return list.toTypedArray()
     }
 
-    /**
-     * True for Minecraft 26.2 and 26.3 (releases, snapshots and pre-releases).
-     * Checks the install name, the version JSON id and `inheritsFrom`, so renamed
-     * installs and loader profiles (Fabric/Forge/NeoForge on 26.x) are detected too.
-     */
     private fun isMinecraft26Native(): Boolean =
         listOfNotNull(
             minecraftVersion.getVersionName(),
@@ -328,13 +278,12 @@ class LaunchArgs(
 
     companion object {
         // 26.2, 26.2.1, 26.2-snapshot-3, 26.3-pre1, ...
-        private val MC_26_NATIVE_REGEX = Regex("""^26\\.[23](?:[.-].*)?$""")
+        private val MC_26_NATIVE_REGEX = Regex("""^26\.[23](?:[.\-].*)?$""")
 
         // Loader profile ids that end with the game version, e.g. fabric-loader-0.19.3-26.3
-        private val MC_26_LOADER_REGEX = Regex("""-26\\.[23](?:\\.\\d+)?(?:-[A-Za-z0-9._\\-]+)?$""")
+        private val MC_26_LOADER_REGEX = Regex("""-26\.[23](?:\.\d+)?(?:-[A-Za-z0-9._\-]+)?$""")
 
-        // LWJGL 3.4.1 Android JNI libraries as packaged in the APK -> the name LWJGL loads.
-        // Sourced by Android CI from MojoLauncher/unilwjgl3-builder v3.4.1-r6.
+        // LWJGL 3.4.1 Android JNI libraries from Android CI (Mojo unilwjgl3-builder).
         private val LWJGL_341_JNI_LIBS = mapOf(
             "libmc26_lwjgl.so" to "liblwjgl.so",
             "libmc26_lwjgl_opengl.so" to "liblwjgl_opengl.so",
@@ -346,7 +295,6 @@ class LaunchArgs(
         fun getCacioJavaArgs(isJava8: Boolean): List<String> {
             val argsList: MutableList<String> = ArrayList()
 
-            // Caciocavallo config AWT-enabled version
             argsList.add("-Djava.awt.headless=false")
             argsList.add("-Dcacio.managed.screensize=" + AWTCanvasView.AWT_CANVAS_WIDTH + "x" + AWTCanvasView.AWT_CANVAS_HEIGHT)
             argsList.add("-Dcacio.font.fontmanager=sun.awt.X11FontManager")
@@ -374,8 +322,6 @@ class LaunchArgs(
                 argsList.add("--add-opens=java.desktop/sun.font=ALL-UNNAMED")
                 argsList.add("--add-opens=java.desktop/sun.java2d=ALL-UNNAMED")
                 argsList.add("--add-opens=java.base/java.lang.reflect=ALL-UNNAMED")
-
-                // Opens the java.net package to Arc DNS injector on Java 9+
                 argsList.add("--add-opens=java.base/java.net=ALL-UNNAMED")
             }
 
