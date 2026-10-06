@@ -34,7 +34,7 @@ class LaunchArgs(
         argsList.addAll(getJavaArgs())
         argsList.addAll(getMinecraftJVMArgs())
         argsList.add("-cp")
-        argsList.add("${Tools.getLWJGL3ClassPath(minecraftVersion)}:$launchClassPath")
+        argsList.add("${withAndroidGlfwBridge(Tools.getLWJGL3ClassPath(minecraftVersion))}:$launchClassPath")
 
         if (runtime.javaVersion > 8) {
             argsList.add("--add-exports")
@@ -47,6 +47,25 @@ class LaunchArgs(
         argsList.addAll(getMinecraftClientArgs())
 
         return argsList
+    }
+
+    /**
+     * Minecraft 26.x's per-version LWJGL stack contains the official LWJGL 3.4.1 GLFW classes,
+     * which call into a real libglfw.so. On Android there is no such library: the launcher
+     * implements GLFW itself (lwjgl-glfw-classes.jar, a Java GLFW that talks to libpojavexec.so).
+     * Put that bridge in front so its org.lwjgl.glfw.GLFW wins over the official one.
+     * (The Mojo GLFW build that was tried before needs MojoLauncher's own activity/runtime and
+     * segfaults inside libglfw.so when started from this launcher.)
+     */
+    private fun withAndroidGlfwBridge(lwjglClassPath: String): String {
+        if (!isMinecraft26Native()) return lwjglClassPath
+
+        val candidates = listOf(
+            File(PathManager.DIR_GAME_HOME, "lwjgl3/lwjgl-glfw-classes.jar"),
+            File(PathManager.DIR_DATA, "components/lwjgl3/lwjgl-glfw-classes.jar")
+        )
+        val bridge = candidates.firstOrNull { it.isFile } ?: return lwjglClassPath
+        return "${bridge.absolutePath}:$lwjglClassPath"
     }
 
     private fun getJavaArgs(): List<String> {
@@ -96,6 +115,12 @@ class LaunchArgs(
             argsList.add("-Dorg.lwjgl.spvc.libname=$androidNativeDir/libspirv-cross.so")
             argsList.add("-Dorg.lwjgl.shaderc.libname=$androidNativeDir/libshaderc.so")
             argsList.add("-Dorg.lwjgl.vma.libname=$androidNativeDir/libvma.so")
+
+            // Diagnostics while 26.x support is being brought up: print the full JVM crash
+            // report (hs_err) into the game log instead of a file in a folder that apps
+            // can't browse on newer Android, and log which native library LWJGL fails to load.
+            argsList.add("-XX:+ErrorFileToStdout")
+            argsList.add("-Dorg.lwjgl.util.DebugLoader=true")
         }
         val versionSpecificNativesDir = File(PathManager.DIR_CACHE, "natives/${minecraftVersion.getVersionName()}")
         if (versionSpecificNativesDir.exists()) {
