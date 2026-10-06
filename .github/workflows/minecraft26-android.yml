@@ -54,6 +54,57 @@ jobs:
       - name: Install native tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build cmake unzip binutils
 
+      # ------------------------------------------------------------------
+      # Core LWJGL natives (fixes Callback.getCallbackHandler UnsatisfiedLinkError)
+      # ------------------------------------------------------------------
+      # Minecraft 26.2 loads LWJGL 3.4.1 Java classes. The desktop
+      # natives-linux-arm64 jars from Maven are NOT valid on Android Bionic
+      # and produce "liblwjgl.so: unknown type" + missing JNI exports.
+      # The prebuilt AAR already contains correct aarch64 Android natives.
+      - name: Extract core LWJGL natives from AAR
+        shell: bash
+        run: |
+          set -euo pipefail
+          AAR="ZalithLauncher/libs/lwjgl3-natives-release.aar"
+          test -f "$AAR"
+          OUT="ZalithLauncher/src/main/jniLibs/arm64-v8a"
+          mkdir -p "$OUT"
+
+          TMP="$(mktemp -d)"
+          unzip -qo "$AAR" -d "$TMP"
+
+          # Required core modules for NativeLibrariesBootstrap / GLFW init
+          for lib in liblwjgl.so liblwjgl_opengl.so liblwjgl_stb.so liblwjgl_tinyfd.so \
+                     libfreetype.so liblwjgl_nanovg.so liblwjgl_vma.so libshaderc.so; do
+            SRC="$TMP/jni/arm64-v8a/$lib"
+            if [ -f "$SRC" ]; then
+              cp -f "$SRC" "$OUT/$lib"
+              echo "Installed $lib ($(stat -c%s "$OUT/$lib") bytes)"
+            else
+              echo "WARNING: $lib not present in AAR"
+            fi
+          done
+
+          # Sanity: real aarch64 ELF, no desktop libstdc++
+          for so in "$OUT"/liblwjgl.so "$OUT"/liblwjgl_opengl.so; do
+            test -f "$so"
+            file "$so" | tee /dev/stderr | grep -qi 'shared object\|ELF'
+            readelf -h "$so" | grep -E 'Class:|Machine:'
+            ! readelf -d "$so" | grep -q 'libstdc++.so.6'
+          done
+
+          # Critical: Callback JNI entry that 26.2 hits during GLFW.<clinit>
+          echo "Checking Callback JNI exports in liblwjgl.so…"
+          nm -D --defined-only "$OUT/liblwjgl.so" | tee "$OUT/liblwjgl.symbols" || true
+          if ! grep -q 'Java_org_lwjgl_system_Callback_getCallbackHandler' "$OUT/liblwjgl.symbols"; then
+            echo "ERROR: liblwjgl.so is missing Java_org_lwjgl_system_Callback_getCallbackHandler"
+            echo "This is exactly the UnsatisfiedLinkError seen on 26.2."
+            exit 1
+          fi
+          echo "OK: Callback.getCallbackHandler is present"
+
+          rm -rf "$TMP"
+
       - name: Build Android GLFW + SDL3 backend from MojoLauncher
         shell: bash
         run: |
@@ -201,7 +252,8 @@ jobs:
           # Strip ELF symbol-version suffixes (@@LWJGL). Drop leading '_' and the
           # bare version token "LWJGL" that remains after stripping.
           public_symbols() {
-            nm -D --defined-only "$1" | awk '{print $3}' | sed 's/@.*//' |             { grep -vE '^(_|LWJGL$)' || true; } | sort -u
+            nm -D --defined-only "$1" | awk '{print $3}' | sed 's/@.*//' |
+            { grep -vE '^(_|LWJGL$)' || true; } | sort -u
           }
 
           for so in "$OUT"/*.so; do
@@ -238,15 +290,20 @@ jobs:
           done
 
           mkdir -p ZalithLauncher/src/main/jniLibs/arm64-v8a
+          # Prefer freshly built modules; keep AAR core libs unless overwritten
           cp "$OUT/libspirv-cross.so" ZalithLauncher/src/main/jniLibs/arm64-v8a/
           cp "$OUT/libshaderc.so" ZalithLauncher/src/main/jniLibs/arm64-v8a/
-          cp "$OUT/libvma.so" ZalithLauncher/src/main/jniLibs/arm64-v8a/
+          cp "$OUT/libvma.so" ZalithLauncher/src/main/jniLibs/arm64-v8a/liblwjgl_vma.so
+          # also keep plain libvma.so name for any hardcoded paths
+          cp "$OUT/libvma.so" ZalithLauncher/src/main/jniLibs/arm64-v8a/libvma.so
 
       - name: Upload native libraries
         uses: actions/upload-artifact@v4
         with:
           name: Minecraft-26.x-Android-arm64-natives
-          path: .mc26-native/out/*.so
+          path: |
+            ZalithLauncher/src/main/jniLibs/arm64-v8a/*.so
+            .mc26-native/out/*.so
 
       - name: Build debug arm64 APK
         run: |
