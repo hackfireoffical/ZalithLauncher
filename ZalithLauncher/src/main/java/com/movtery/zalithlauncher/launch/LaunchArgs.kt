@@ -371,10 +371,10 @@ class LaunchArgs(
         private const val BRIDGE_26_JAR = "lwjgl-glfw-classes-26.jar"
 
         // 26.2, 26.2.1, 26.2-snapshot-3, 26.3-pre1, ...
-        private val MC_26_NATIVE_REGEX = Regex("""^26\\.[23](?:[.\\-].*)?$""")
+        private val MC_26_NATIVE_REGEX = Regex("""^26\.[23](?:[.\-].*)?$""")
 
         // Loader profile ids that end with the game version, e.g. fabric-loader-0.19.3-26.3
-        private val MC_26_LOADER_REGEX = Regex("""-26\\.[23](?:\\.\\d+)?(?:-[A-Za-z0-9._\\-]+)?$""")
+        private val MC_26_LOADER_REGEX = Regex("""-26\.[23](?:\.\d+)?(?:-[A-Za-z0-9._\-]+)?$""")
 
         // LWJGL 3.4.1 Android JNI libraries from Android CI (Mojo unilwjgl3-builder).
         private val LWJGL_341_JNI_LIBS = mapOf(
