@@ -51,6 +51,23 @@ val bridgeJar26 = tasks.register<Jar>("bridgeJar26") {
     from(sourceSets["main"].output)
     exclude("net/java/openjdk/cacio/ctc/**")
     doLast {
+        // Guard: fail the CI build if LWJGL core classes ever leak back into this jar.
+        val jarFile = archiveFile.get().asFile
+        java.util.zip.ZipFile(jarFile).use { zip ->
+            val names = zip.entries().asSequence().map { it.name }.toList()
+            check("org/lwjgl/glfw/GLFW.class" in names) {
+                "${jarFile.name}: org/lwjgl/glfw/GLFW.class is missing"
+            }
+            val leaked = names.filter {
+                it.startsWith("org/lwjgl/system/") || it == "org/lwjgl/Version.class"
+            }
+            check(leaked.isEmpty()) {
+                "${jarFile.name} must not contain LWJGL core classes (they would shadow 3.4.1): " +
+                    leaked.take(10).joinToString()
+            }
+            println("${jarFile.name}: ${names.size} entries, no LWJGL core classes")
+        }
+
         val versionFile = file("../ZalithLauncher/src/main/assets/components/lwjgl3/version")
         versionFile.writeText(System.currentTimeMillis().toString())
     }
