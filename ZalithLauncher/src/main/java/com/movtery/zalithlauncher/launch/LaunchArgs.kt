@@ -291,7 +291,13 @@ class LaunchArgs(
         val verArgMap: MutableMap<String, String> = ArrayMap()
         verArgMap["auth_session"] = account.accessToken
         verArgMap["auth_access_token"] = account.accessToken
-        verArgMap["auth_player_name"] = account.username
+        // Minecraft protocol limits the username in ServerboundHelloPacket to 16 chars.
+        // Offline accounts can be longer in the launcher UI; clamp here so singleplayer works.
+        val playerName = account.username.let { if (it.length > 16) it.take(16) else it }
+        if (playerName != account.username) {
+            Logging.w(TAG, "Username '${account.username}' exceeds 16 chars; using '$playerName' for the game")
+        }
+        verArgMap["auth_player_name"] = playerName
         verArgMap["auth_uuid"] = account.profileId.replace("-", "")
         verArgMap["auth_xuid"] = account.xuid
         verArgMap["assets_root"] = ProfilePathHome.getAssetsHome()
@@ -333,12 +339,29 @@ class LaunchArgs(
         return list.toTypedArray()
     }
 
-    private fun isMinecraft26Native(): Boolean =
-        listOfNotNull(
+    /**
+     * True when this launch targets Minecraft 26.2 / 26.3 (vanilla or any loader profile).
+     *
+     * Custom-named profiles (e.g. "OptiMobile (Fabric)") do not match ^26\.[23] on the
+     * folder name. The real game version is stored in VersionInfo.minecraftVersion and
+     * usually also in versionInfo.inheritsFrom / versionInfo.id (fabric-loader-*-26.2).
+     */
+    private fun isMinecraft26Native(): Boolean {
+        val zalithInfo = minecraftVersion.getVersionInfo()?.minecraftVersion
+        val candidates = listOfNotNull(
+            zalithInfo,
             minecraftVersion.getVersionName(),
             versionInfo.id,
             versionInfo.inheritsFrom
-        ).any { MC_26_NATIVE_REGEX.matches(it) || MC_26_LOADER_REGEX.containsMatchIn(it) }
+        )
+        val hit = candidates.any { c ->
+            MC_26_NATIVE_REGEX.matches(c) || MC_26_LOADER_REGEX.containsMatchIn(c)
+        }
+        if (!hit) {
+            Logging.d(TAG, "isMinecraft26Native=false candidates=$candidates")
+        }
+        return hit
+    }
 
     companion object {
         private const val TAG = "LaunchArgs"
@@ -348,10 +371,10 @@ class LaunchArgs(
         private const val BRIDGE_26_JAR = "lwjgl-glfw-classes-26.jar"
 
         // 26.2, 26.2.1, 26.2-snapshot-3, 26.3-pre1, ...
-        private val MC_26_NATIVE_REGEX = Regex("""^26\.[23](?:[.\-].*)?$""")
+        private val MC_26_NATIVE_REGEX = Regex("""^26\\.[23](?:[.\\-].*)?$""")
 
         // Loader profile ids that end with the game version, e.g. fabric-loader-0.19.3-26.3
-        private val MC_26_LOADER_REGEX = Regex("""-26\.[23](?:\.\d+)?(?:-[A-Za-z0-9._\-]+)?$""")
+        private val MC_26_LOADER_REGEX = Regex("""-26\\.[23](?:\\.\\d+)?(?:-[A-Za-z0-9._\\-]+)?$""")
 
         // LWJGL 3.4.1 Android JNI libraries from Android CI (Mojo unilwjgl3-builder).
         private val LWJGL_341_JNI_LIBS = mapOf(
