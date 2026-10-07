@@ -5,6 +5,7 @@ import com.movtery.zalithlauncher.InfoDistributor
 import com.movtery.zalithlauncher.feature.accounts.AccountUtils
 import com.movtery.zalithlauncher.feature.customprofilepath.ProfilePathHome
 import com.movtery.zalithlauncher.feature.customprofilepath.ProfilePathHome.Companion.getLibrariesHome
+import com.movtery.zalithlauncher.feature.log.Logging
 import com.movtery.zalithlauncher.feature.version.Version
 import com.movtery.zalithlauncher.setting.AllSettings
 import com.movtery.zalithlauncher.utils.ZHTools
@@ -18,6 +19,7 @@ import net.kdt.pojavlaunch.utils.JSONUtils
 import net.kdt.pojavlaunch.value.MinecraftAccount
 import org.jackhuang.hmcl.util.versioning.VersionNumber
 import java.io.File
+import java.io.FileInputStream
 
 class LaunchArgs(
     private val account: MinecraftAccount,
@@ -34,7 +36,12 @@ class LaunchArgs(
         argsList.addAll(getJavaArgs())
         argsList.addAll(getMinecraftJVMArgs())
         argsList.add("-cp")
-        argsList.add("${withAndroidGlfwBridge(Tools.getLWJGL3ClassPath(minecraftVersion))}:$launchClassPath")
+        val lwjglCp = withAndroidGlfwBridge(Tools.getLWJGL3ClassPath(minecraftVersion))
+        argsList.add("$lwjglCp:$launchClassPath")
+
+        if (isMinecraft26Native()) {
+            Logging.i(TAG, "MC 26.x LWJGL classpath (bridge first): $lwjglCp")
+        }
 
         if (runtime.javaVersion > 8) {
             argsList.add("--add-exports")
@@ -94,6 +101,14 @@ class LaunchArgs(
 
             val lwjgl341Dir = prepareLwjgl341Natives()
 
+            if (lwjgl341Dir != null) {
+                Logging.i(TAG, "MC 26.x: using prepared Android LWJGL 3.4.1 JNI dir: $lwjgl341Dir")
+            } else {
+                Logging.w(TAG, "MC 26.x: Android LWJGL 3.4.1 JNI natives missing or invalid " +
+                    "(libmc26_*.so not present / not ELF). Falling back to $androidNativeDir. " +
+                    "Expect UnsatisfiedLinkError on Callback/GLFW if the wrong liblwjgl.so is loaded.")
+            }
+
             argsList.add("-Dorg.lwjgl.system.SharedLibraryExtractPath=${lwjglExtractDir.absolutePath}")
             argsList.add("-Dorg.lwjgl.librarypath=${lwjgl341Dir ?: androidNativeDir}")
             argsList.add("-Dorg.lwjgl.spvc.libname=$androidNativeDir/libspirv-cross.so")
@@ -116,7 +131,9 @@ class LaunchArgs(
     /**
      * Copies Android CI libmc26_*.so into game-native/<ver>/lwjgl-jni under the
      * names LWJGL expects. Returns that dir only when every required library is
-     * present and non-empty; otherwise null so we never point at "unknown type" junk.
+     * a present, non-empty, valid ELF shared object; otherwise null so we never
+     * point org.lwjgl.librarypath at "unknown type" junk that causes
+     * UnsatisfiedLinkError on Callback.getCallbackHandler / GLFW init.
      */
     private fun prepareLwjgl341Natives(): String? {
         val srcDir = File(PathManager.DIR_NATIVE_LIB)
@@ -128,28 +145,60 @@ class LaunchArgs(
         val sources = LWJGL_341_JNI_LIBS.map { (packagedName, lwjglName) ->
             Triple(File(srcDir, packagedName), File(destDir, lwjglName), lwjglName)
         }
-        val missing = sources.filter { (src, _, _) -> !src.isFile || src.length() < 1024L }
-        if (missing.isNotEmpty()) {
+
+        val invalid = sources.filter { (src, _, name) ->
+            !src.isFile || src.length() < MIN_SO_BYTES || !isElfSharedObject(src)
+        }
+        if (invalid.isNotEmpty()) {
+            Logging.w(TAG, "MC 26.x: missing or non-ELF libmc26_* sources: " +
+                invalid.joinToString { it.third })
             return null
         }
 
-        if (!destDir.exists() && !destDir.mkdirs()) return null
+        if (!destDir.exists() && !destDir.mkdirs()) {
+            Logging.w(TAG, "MC 26.x: cannot create $destDir")
+            return null
+        }
 
         try {
-            for ((src, dest, _) in sources) {
+            for ((src, dest, name) in sources) {
                 src.copyTo(dest, overwrite = true)
-                if (!dest.isFile || dest.length() < 1024L) {
+                if (!dest.isFile || dest.length() < MIN_SO_BYTES || !isElfSharedObject(dest)) {
+                    Logging.w(TAG, "MC 26.x: copy of $name produced invalid ELF, aborting")
                     destDir.deleteRecursively()
                     return null
                 }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Logging.w(TAG, "MC 26.x: failed to prepare LWJGL 3.4.1 natives", e)
             runCatching { destDir.deleteRecursively() }
             return null
         }
 
         val core = File(destDir, "liblwjgl.so")
-        return if (core.isFile && core.length() >= 1024L) destDir.absolutePath else null
+        return if (core.isFile && core.length() >= MIN_SO_BYTES && isElfSharedObject(core)) {
+            destDir.absolutePath
+        } else {
+            runCatching { destDir.deleteRecursively() }
+            null
+        }
+    }
+
+    /** True if the file starts with the ELF magic and is at least a plausible shared object. */
+    private fun isElfSharedObject(file: File): Boolean {
+        return try {
+            FileInputStream(file).use { ins ->
+                val magic = ByteArray(4)
+                if (ins.read(magic) != 4) return false
+                // 0x7F 'E' 'L' 'F'
+                magic[0] == 0x7F.toByte() &&
+                    magic[1] == 'E'.code.toByte() &&
+                    magic[2] == 'L'.code.toByte() &&
+                    magic[3] == 'F'.code.toByte()
+            }
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun getMinecraftJVMArgs(): Array<String> {
@@ -197,7 +246,9 @@ class LaunchArgs(
 
         val lwjglJni = File(nativeWorkDir, "lwjgl-jni")
         val libraryPathParts = buildList {
-            if (File(lwjglJni, "liblwjgl.so").isFile) add(lwjglJni.absolutePath)
+            if (File(lwjglJni, "liblwjgl.so").isFile && isElfSharedObject(File(lwjglJni, "liblwjgl.so"))) {
+                add(lwjglJni.absolutePath)
+            }
             add("$nativeWorkDir/lwjgl")
             add(nativeDir)
             add(PathManager.DIR_NATIVE_LIB)
@@ -277,6 +328,9 @@ class LaunchArgs(
         ).any { MC_26_NATIVE_REGEX.matches(it) || MC_26_LOADER_REGEX.containsMatchIn(it) }
 
     companion object {
+        private const val TAG = "LaunchArgs"
+        private const val MIN_SO_BYTES = 1024L
+
         // 26.2, 26.2.1, 26.2-snapshot-3, 26.3-pre1, ...
         private val MC_26_NATIVE_REGEX = Regex("""^26\.[23](?:[.\-].*)?$""")
 
