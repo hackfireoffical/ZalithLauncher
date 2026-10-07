@@ -59,17 +59,30 @@ class LaunchArgs(
     /**
      * Minecraft 26.x's per-version LWJGL stack contains the official LWJGL 3.4.1 GLFW classes,
      * which call into a real libglfw.so. On Android there is no such library: the launcher
-     * implements GLFW itself (lwjgl-glfw-classes.jar, a Java GLFW that talks to libpojavexec.so).
+     * implements GLFW itself (a Java GLFW that talks to libpojavexec.so).
+     *
      * Put that bridge in front so its org.lwjgl.glfw.GLFW wins over the official one.
+     *
+     * IMPORTANT: use lwjgl-glfw-classes-26.jar here, NOT lwjgl-glfw-classes.jar. The legacy jar
+     * bundles an entire LWJGL 3.3.6 (org.lwjgl.system.Callback, MemoryUtil, ...). Coming first on
+     * the classpath it shadows the 3.4.1 core, and its Callback calls the native
+     * Callback.getCallbackHandler(Method) that the 3.4.1 liblwjgl.so does not have
+     * (UnsatisfiedLinkError in GLFW.<clinit>). The -26 jar holds only the launcher's own classes.
      */
     private fun withAndroidGlfwBridge(lwjglClassPath: String): String {
         if (!isMinecraft26Native()) return lwjglClassPath
 
         val candidates = listOf(
-            File(PathManager.DIR_GAME_HOME, "lwjgl3/lwjgl-glfw-classes.jar"),
-            File(PathManager.DIR_DATA, "components/lwjgl3/lwjgl-glfw-classes.jar")
+            File(PathManager.DIR_GAME_HOME, "lwjgl3/$BRIDGE_26_JAR"),
+            File(PathManager.DIR_DATA, "components/lwjgl3/$BRIDGE_26_JAR")
         )
-        val bridge = candidates.firstOrNull { it.isFile } ?: return lwjglClassPath
+        val bridge = candidates.firstOrNull { it.isFile }
+        if (bridge == null) {
+            Logging.e(TAG, "MC 26.x: $BRIDGE_26_JAR not found (looked in " +
+                candidates.joinToString { it.absolutePath } + "). Rebuild the launcher with the " +
+                "Android CI workflow; without it GLFW cannot work on Android.")
+            return lwjglClassPath
+        }
         return "${bridge.absolutePath}:$lwjglClassPath"
     }
 
@@ -330,6 +343,9 @@ class LaunchArgs(
     companion object {
         private const val TAG = "LaunchArgs"
         private const val MIN_SO_BYTES = 1024L
+
+        /** Launcher-only GLFW bridge for 26.x (built by jre_lwjgl3glfw:bridgeJar26). */
+        private const val BRIDGE_26_JAR = "lwjgl-glfw-classes-26.jar"
 
         // 26.2, 26.2.1, 26.2-snapshot-3, 26.3-pre1, ...
         private val MC_26_NATIVE_REGEX = Regex("""^26\.[23](?:[.\-].*)?$""")
