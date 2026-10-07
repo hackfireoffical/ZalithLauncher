@@ -278,12 +278,19 @@ jobs:
             readelf -h "$so" | grep -E 'Class:|Machine:'
             # Android build: must not depend on glibc
             ! readelf -d "$so" | grep -q 'libc.so.6'
+            # Must be a real ELF (guards against empty / corrupt downloads)
+            test "$(xxd -p -l 4 "$so")" = "7f454c46"
           done
 
-          # This is the exact function the game crashed on (UnsatisfiedLinkError).
+          # Critical symbols required by LWJGL 3.4.1 Callback / GLFW init on Android.
+          # Missing either of these produces the UnsatisfiedLinkError seen on 26.2.
           nm -D --defined-only "$DEST/libmc26_lwjgl.so" | grep -q 'Java_org_lwjgl_system_libffi_LibFFI_ffi_1get_1closure_1size' \
             || { echo "libmc26_lwjgl.so has no libffi JNI exports - Mojo's liblwjgl.so is not what we assumed"; nm -D --defined-only "$DEST/libmc26_lwjgl.so" | head -80; exit 1; }
           echo "libffi JNI exports present"
+
+          nm -D --defined-only "$DEST/libmc26_lwjgl.so" | grep -q 'Java_org_lwjgl_system_Upcalls_getCallbackHandler' \
+            || { echo "libmc26_lwjgl.so missing Upcalls_getCallbackHandler (Callback/GLFW will UnsatisfiedLinkError)"; nm -D --defined-only "$DEST/libmc26_lwjgl.so" | grep -i callback || true; exit 1; }
+          echo "Upcalls_getCallbackHandler present"
 
       - name: Check all native libraries exist
         run: |
