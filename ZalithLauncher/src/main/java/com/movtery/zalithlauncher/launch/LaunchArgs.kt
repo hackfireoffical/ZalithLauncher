@@ -68,6 +68,10 @@ class LaunchArgs(
      * the classpath it shadows the 3.4.1 core, and its Callback calls the native
      * Callback.getCallbackHandler(Method) that the 3.4.1 liblwjgl.so does not have
      * (UnsatisfiedLinkError in GLFW.<clinit>). The -26 jar holds only the launcher's own classes.
+     *
+     * Tools.getLWJGL3ClassPath often still injects the legacy jar (and sometimes a second
+     * copy of the -26 bridge). Strip every lwjgl-glfw-classes*.jar entry, then put exactly
+     * one -26 bridge at the front.
      */
     private fun withAndroidGlfwBridge(lwjglClassPath: String): String {
         if (!isMinecraft26Native()) return lwjglClassPath
@@ -83,7 +87,14 @@ class LaunchArgs(
                 "Android CI workflow; without it GLFW cannot work on Android.")
             return lwjglClassPath
         }
-        return "${bridge.absolutePath}:$lwjglClassPath"
+
+        val cleaned = lwjglClassPath
+            .split(':')
+            .filter { it.isNotEmpty() && !it.substringAfterLast('/').startsWith("lwjgl-glfw-classes") }
+            .joinToString(":")
+
+        return if (cleaned.isEmpty()) bridge.absolutePath
+        else "${bridge.absolutePath}:$cleaned"
     }
 
     private fun getJavaArgs(): List<String> {
