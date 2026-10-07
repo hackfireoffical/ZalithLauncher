@@ -1,3 +1,5 @@
+import java.util.zip.ZipFile
+
 plugins {
     java
 }
@@ -53,13 +55,13 @@ val bridgeJar26 = tasks.register<Jar>("bridgeJar26") {
     doLast {
         // Guard: fail the CI build if LWJGL core classes ever leak back into this jar.
         val jarFile = archiveFile.get().asFile
-        java.util.zip.ZipFile(jarFile).use { zip ->
-            val names = zip.entries().asSequence().map { it.name }.toList()
+        ZipFile(jarFile).use { zip ->
+            val names = zip.entries().toList().map { entry -> entry.name }
             check("org/lwjgl/glfw/GLFW.class" in names) {
                 "${jarFile.name}: org/lwjgl/glfw/GLFW.class is missing"
             }
-            val leaked = names.filter {
-                it.startsWith("org/lwjgl/system/") || it == "org/lwjgl/Version.class"
+            val leaked = names.filter { name ->
+                name.startsWith("org/lwjgl/system/") || name == "org/lwjgl/Version.class"
             }
             check(leaked.isEmpty()) {
                 "${jarFile.name} must not contain LWJGL core classes (they would shadow 3.4.1): " +
